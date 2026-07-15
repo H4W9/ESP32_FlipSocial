@@ -114,12 +114,19 @@ static void applyThemeToViewManager() {
 #else
   #define PW_RGB_PIN LED_BUILTIN
 #endif
-static void ledRGB(uint8_t r, uint8_t g, uint8_t b) { rgbLedWrite(PW_RGB_PIN, r, g, b); }
-static inline void ledOff()  { ledRGB(0, 0, 0); }
-static inline void ledWifi() { ledRGB(45, 30, 0); }   // amber — scanning / connecting
-static inline void ledHttp() { ledRGB(0, 0, 55); }    // blue  — HTTP request in flight
-static inline void ledOk()   { ledRGB(0, 55, 0); }    // green — success
-static inline void ledErr()  { ledRGB(70, 0, 0); }    // red   — error
+// Colours are full-intensity hues; ledRGB scales them by the LED-brightness
+// setting (0..20, where 0 = off). Default 4 keeps the LED gentle.
+static void ledRGB(uint8_t r, uint8_t g, uint8_t b) {
+  uint16_t s = theme.led_bright;
+  rgbLedWrite(PW_RGB_PIN, (uint8_t)((uint16_t)r * s / 20),
+                          (uint8_t)((uint16_t)g * s / 20),
+                          (uint8_t)((uint16_t)b * s / 20));
+}
+static inline void ledOff()  { rgbLedWrite(PW_RGB_PIN, 0, 0, 0); }   // truly off
+static inline void ledWifi() { ledRGB(255, 150, 0); }  // amber — scanning / connecting
+static inline void ledHttp() { ledRGB(0,   80, 255); } // blue  — HTTP request in flight
+static inline void ledOk()   { ledRGB(0,  255,   0); } // green — success
+static inline void ledErr()  { ledRGB(255,  0,   0); } // red   — error
 // Back-compat shim: old on/off calls map to the WiFi (amber) colour.
 static void ledSet(bool on) { if (on) ledWifi(); else ledOff(); }
 
@@ -330,33 +337,37 @@ static int navHit(uint16_t x, uint16_t y) {
   return c > 2 ? 2 : c;
 }
 
-// One list row (H4W9-style): fill, left text, optional right chevron, divider.
+// One list row: fill, left text, optional right chevron, divider. Divider/chevron
+// follow the theme (neon rainbow on the Neon theme, else edge/dim).
 static void drawListRow(int y, const String &text, bool sel, bool arrow) {
   uint16_t bgc = sel ? COL_SEL : COL_BG;
+  int seed = y / ITEMH;
   tft->fillRect(0, y, SCRW, ITEMH, bgc);
   tft->setTextColor(COL_FG, bgc);
   tft->setTextDatum(ML_DATUM);
   tft->drawString(text, 12, y + ITEMH / 2, 2);
-  if (arrow) drawChevron(SCRW - 26, y, 16, ITEMH, true, COL_DIM);
-  tft->drawFastHLine(0, y + ITEMH - 1, SCRW, theme.edge());
+  if (arrow) drawChevron(SCRW - 26, y, 16, ITEMH, true, theme.neon(seed, COL_DIM));
+  tft->drawFastHLine(0, y + ITEMH - 1, SCRW, theme.neon(seed, theme.edge()));
   tft->setTextDatum(TL_DATUM);
 }
 
-// Sprite version of a list row (for flicker-free momentum scrolling).
-static void drawRowSprite(TFT_eSprite &spr, int y, const String &text, bool arrow) {
+// Sprite version of a list row (for flicker-free momentum scrolling). `seed` is
+// the row index, used to vary the neon hue down the list.
+static void drawRowSprite(TFT_eSprite &spr, int y, const String &text, bool arrow, int seed) {
   spr.fillRect(0, y, SCRW, ITEMH, COL_BG);
   spr.setTextColor(COL_FG, COL_BG);
   spr.setTextDatum(ML_DATUM);
   spr.drawString(text, 12, y + ITEMH / 2, 2);
   if (arrow) {
     int cx = SCRW - 26 + 8, cy = y + ITEMH / 2;
-    spr.fillTriangle(cx - 3, cy - 5, cx - 3, cy + 5, cx + 4, cy, COL_DIM);
+    spr.fillTriangle(cx - 3, cy - 5, cx - 3, cy + 5, cx + 4, cy, theme.neon(seed, COL_DIM));
   }
-  spr.drawFastHLine(0, y + ITEMH - 1, SCRW, theme.edge());
+  spr.drawFastHLine(0, y + ITEMH - 1, SCRW, theme.neon(seed, theme.edge()));
   spr.setTextDatum(TL_DATUM);
 }
 
-// H4W9-style scrollbar drawn into a sprite: track + thumb at the right edge.
+// Scrollbar drawn into a sprite: track + thumb at the right edge. The thumb
+// follows the theme (neon hue on the Neon theme, else dim).
 // `viewH` = visible height, `total` = content height, `scroll` = current offset.
 static void sprScrollBar(TFT_eSprite &spr, int viewH, int total, float scroll) {
   if (total <= viewH) return;
@@ -365,7 +376,8 @@ static void sprScrollBar(TFT_eSprite &spr, int viewH, int total, float scroll) {
   int thumbH = viewH * viewH / total; if (thumbH < 14) thumbH = 14;
   int maxS = total - viewH;
   int thumbY = (maxS > 0) ? (int)((scroll / (float)maxS) * (viewH - thumbH)) : 0;
-  spr.fillRect(bx, thumbY, bw, thumbH, COL_DIM);
+  // Thumb hue tracks the scroll position (neon rainbow on the Neon theme).
+  spr.fillRect(bx, thumbY, bw, thumbH, theme.neon(thumbY / 12, COL_DIM));
 }
 
 // scrollList return sentinels for footer-button taps (Back is SL_BACK).
@@ -403,7 +415,7 @@ static int scrollList(const String &title, String *rows, int n, bool arrow,
       for (int i = 0; i < n; i++) {
         int y = i * ITEMH - (int)scroll;
         if (y + ITEMH < 0 || y > CH) continue;
-        drawRowSprite(spr, y, rows[i], arrow);
+        drawRowSprite(spr, y, rows[i], arrow, i);
       }
       sprScrollBar(spr, CH, total, scroll);
       spr.pushSprite(0, CY);
@@ -700,7 +712,7 @@ static void scanFlow() {
     int rc = (nnet < 0) ? 0 : nnet;
 
     for (int i = 0; i < rc && i < 41; i++)
-      rows[i] = WiFi.SSID(i) + "  (" + WiFi.RSSI(i) + ")";
+      rows[i] = WiFi.SSID(i) + "   ch" + WiFi.channel(i) + "  (" + WiFi.RSSI(i) + ")";
 
     int sel = scrollList("Scan", rows, rc, true, "Back", "Rescan", "");
     if (sel == SL_BACK || sel == SL_F0) return;        // Back
@@ -784,14 +796,15 @@ static void wifiDebug() {
 }
 
 // ── Settings (H4W9 layout: highlight on tap, partial redraw, no flash) ──
-static const int SET_N = 9;   // + About (Theme, Accent, Font Color, Brightness, WiFi, Debug, User, Pass, About)
-// Value string for the two chip rows that need it for hit-testing.
+static const int SET_N = 10;  // Theme, Accent, Font Color, Brightness, LED, WiFi, Debug, User, Pass, About
+// Value string for the chip rows that need it for hit-testing.
 static String setChipVal(int row) {
   switch (row) {
     case 0: return theme.themeName();
     case 1: return theme.accentName();
     case 2: return theme.fontColName();
     case 3: return String(theme.bright + 1) + "/20";
+    case 4: return String(theme.led_bright) + "/20";
   }
   return "";
 }
@@ -804,11 +817,12 @@ static void drawSettingRow(int row, int sel) {
     case 1: drawChipRow(y, "Accent",     theme.accentName(), false, s, 0); break;
     case 2: drawChipRow(y, "Font Color", theme.fontColName(), false, s, theme.fontColPreview()); break;
     case 3: drawChipRow(y, "Brightness", setChipVal(3), true, s, 0); break;
-    case 4: drawInfoRow(y, "WiFi Setup", WiFi.status() == WL_CONNECTED ? WiFi.SSID() : String(""), s); break;
-    case 5: drawInfoRow(y, "WiFi Debug", "", s); break;
-    case 6: drawInfoRow(y, "Username",   credGet("user"), s); break;
-    case 7: drawInfoRow(y, "Password",   credGet("pass").length() ? String("****") : String(""), s); break;
-    case 8: drawInfoRow(y, "About",      "", s); break;
+    case 4: drawChipRow(y, "LED",        setChipVal(4), true, s, 0); break;
+    case 5: drawInfoRow(y, "WiFi Setup", WiFi.status() == WL_CONNECTED ? WiFi.SSID() : String(""), s); break;
+    case 6: drawInfoRow(y, "WiFi Debug", "", s); break;
+    case 7: drawInfoRow(y, "Username",   credGet("user"), s); break;
+    case 8: drawInfoRow(y, "Password",   credGet("pass").length() ? String("****") : String(""), s); break;
+    case 9: drawInfoRow(y, "About",      "", s); break;
   }
 }
 
@@ -853,7 +867,7 @@ static void settingsFlow() {
   for (;;) {
     uint16_t x, y;
     if (!waitTap(x, y)) continue;
-    if (backTapped(x, y)) return;
+    if (backTapped(x, y)) { ledOff(); return; }     // clear any LED preview on exit
     if ((int)y < CONTENTY) continue;
     int row = ((int)y - CONTENTY) / ITEMH;
     if (row < 0 || row >= SET_N) continue;
@@ -861,8 +875,9 @@ static void settingsFlow() {
     // Move the highlight to the tapped row (partial redraw of old + new).
     int old = sel; sel = row;
     if (old != row) { if (old >= 0) drawSettingRow(old, sel); drawSettingRow(row, sel); }
+    if (row != 4) ledOff();                         // LED preview only while on the LED row
 
-    int h = (row <= 3) ? chipHit(CONTENTY + row * ITEMH, setChipVal(row), x, y) : -1;
+    int h = (row <= 4) ? chipHit(CONTENTY + row * ITEMH, setChipVal(row), x, y) : -1;
     switch (row) {
       case 0: if (h >= 0) { theme.cycleTheme(h); theme.save(); applyThemeToViewManager(); full(); } break;
       case 1: if (h >= 0) { theme.cycleAccent(h); theme.save(); applyThemeToViewManager(); drawSettingRow(1, sel); } break;
@@ -870,17 +885,21 @@ static void settingsFlow() {
       case 3: if (h == 0 && theme.bright > 0)  theme.bright--;
               else if (h == 1 && theme.bright < 19) theme.bright++;
               if (h >= 0) { theme.save(); applyBrightness(); drawSettingRow(3, sel); } break;
-      case 4: wifiSetup(); full(); break;
-      case 5: wifiDebug(); full(); break;
-      case 6: { char b[64] = {0}; String u = credGet("user"); strncpy(b, u.c_str(), sizeof(b) - 1);
+      case 4: if (h == 0 && theme.led_bright > 0)  theme.led_bright--;
+              else if (h == 1 && theme.led_bright < 20) theme.led_bright++;
+              if (h >= 0) { theme.save(); drawSettingRow(4, sel); }
+              ledWifi(); break;                     // live preview at the new brightness
+      case 5: wifiSetup(); full(); break;
+      case 6: wifiDebug(); full(); break;
+      case 7: { char b[64] = {0}; String u = credGet("user"); strncpy(b, u.c_str(), sizeof(b) - 1);
                 if (touchKeyboardInput(*tft, COL_FG, COL_BG, b, sizeof(b), "FlipSocial User:", false))
                   credSet("user", String(b));
                 full(); } break;
-      case 7: { char b[64] = {0}; String p = credGet("pass"); strncpy(b, p.c_str(), sizeof(b) - 1);
+      case 8: { char b[64] = {0}; String p = credGet("pass"); strncpy(b, p.c_str(), sizeof(b) - 1);
                 if (touchKeyboardInput(*tft, COL_FG, COL_BG, b, sizeof(b), "FlipSocial Password:", true))
                   credSet("pass", String(b));
                 full(); } break;
-      case 8: aboutScreen(); full(); break;
+      case 9: aboutScreen(); full(); break;
       default: break;
     }
   }

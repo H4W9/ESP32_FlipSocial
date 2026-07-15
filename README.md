@@ -2,8 +2,7 @@
 
 A standalone HTTP firmware for the **Pancake** board (ESP32-C5, ST7796 320×480,
 FT6336 capacitive touch) — a touch port of [Picoware](https://github.com/jblanked/Picoware)
-that natively runs **FlipSocial** and **FlipWorld** with their own WiFi/HTTP, no
-Flipper Zero attached.
+that natively runs **FlipSocial**.
 
 ## Status — staged build
 

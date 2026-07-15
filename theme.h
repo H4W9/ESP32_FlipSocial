@@ -77,10 +77,11 @@ static const uint8_t PW_FONTCOL_COUNT = 24;
 // acc_by_theme / fc_by_theme are indexed by theme; value 0 = "Default", so each
 // theme keeps its own accent + font-colour choices (defaults per theme).
 struct Theme {
-  uint8_t theme_idx = 0;
-  uint8_t bright    = 15;                     // 0..19
-  uint8_t acc_by_theme[PW_THEME_COUNT];       // 0 = Default (themeHighlight), else accent+1
-  uint8_t fc_by_theme[PW_THEME_COUNT];        // 0 = Default (theme fg), else PW_FONTCOL_VAL idx
+  uint8_t theme_idx  = 0;
+  uint8_t bright     = 15;                     // screen backlight, 0..19
+  uint8_t led_bright = 4;                      // RGB status LED, 0..20 (0 = off)
+  uint8_t acc_by_theme[PW_THEME_COUNT];        // 0 = Default (themeHighlight), else accent+1
+  uint8_t fc_by_theme[PW_THEME_COUNT];         // 0 = Default (theme fg), else PW_FONTCOL_VAL idx
 
   Theme() {
     for (uint8_t i = 0; i < PW_THEME_COUNT; i++) { acc_by_theme[i] = 0; fc_by_theme[i] = 0; }
@@ -153,7 +154,7 @@ struct Theme {
   }
 
   void defaults() {
-    theme_idx = 0; bright = 15;
+    theme_idx = 0; bright = 15; led_bright = 4;
     for (uint8_t i = 0; i < PW_THEME_COUNT; i++) { acc_by_theme[i] = 0; fc_by_theme[i] = 0; }
   }
   void load() {
@@ -164,10 +165,12 @@ struct Theme {
       bright    = (uint8_t)f.read();
       f.read(acc_by_theme, PW_THEME_COUNT);
       f.read(fc_by_theme, PW_THEME_COUNT);
+      if (f.available() > 0) led_bright = (uint8_t)f.read();   // newer files append this
     }
     if (f) f.close();
     if (theme_idx >= PW_THEME_COUNT) theme_idx = 0;
     if (bright > 19) bright = 15;
+    if (led_bright > 20) led_bright = 4;
     for (uint8_t i = 0; i < PW_THEME_COUNT; i++) {
       if (acc_by_theme[i] > PW_ACCENT_COUNT)   acc_by_theme[i] = 0;
       if (fc_by_theme[i]  >= PW_FONTCOL_COUNT)  fc_by_theme[i]  = 0;
@@ -180,6 +183,7 @@ struct Theme {
     f.write(bright);
     f.write(acc_by_theme, PW_THEME_COUNT);
     f.write(fc_by_theme, PW_THEME_COUNT);
+    f.write(led_bright);
     f.close();
   }
 };

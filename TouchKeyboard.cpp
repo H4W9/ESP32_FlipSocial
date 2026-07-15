@@ -131,37 +131,30 @@ static bool kbBackspace(char* buf, size_t& cursor) {
     return true;
 }
 
-static void drawTextArea(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
+// Partial redraw for typing/cursor moves: only the input-box interior (text +
+// caret) and the char-count header. No top-area clear → the top doesn't flash.
+static void drawTextLine(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
                          uint16_t scrW, uint16_t scrH,
                          const char* title, const char* buffer,
-                         size_t cursor, size_t& viewStart,
+                         size_t cursor, size_t& viewStart, size_t bufLen,
                          bool password, bool reveal) {
-    int16_t areaH = kbY(scrH);
-    tft.fillRect(0, 0, (int16_t)scrW, areaH, bg);
-
-    int16_t y = 6;
-    if (title && title[0]) {
-        tft.setTextColor(TFT_GREEN, bg);
-        tft.drawString(title, 4, y, 2);
-        y += 22;
-    }
-
-    // Framed input box
-    int16_t boxY = y, boxH = 26;
-    tft.drawRect(4, boxY, (int16_t)scrW - 8, boxH, fg);
-
+    (void)scrH;
+    int16_t titleH = (title && title[0]) ? 22 : 0;
+    int16_t boxY = 6 + titleH, boxH = 26;
+    int16_t tx = 8, ty = boxY + (boxH - 16) / 2;
+    int16_t maxW = (int16_t)scrW - 8 - 12;
     const char* p = buffer ? buffer : "";
     size_t n = strlen(p);
     if (cursor > n) cursor = n;
     bool mask = password && !reveal;
-    int16_t tx = 8, ty = boxY + (boxH - 16) / 2;
-    int16_t maxW = (int16_t)scrW - 8 - 12;
+
+    // Clear only the interior of the framed box.
+    tft.fillRect(5, boxY + 1, (int16_t)scrW - 10, boxH - 2, bg);
 
     // Horizontal scroll: keep the cursor inside the visible window.
     if (cursor < viewStart) viewStart = cursor;
     while (viewStart < cursor && kbSubW(tft, p, viewStart, cursor, mask) > maxW) viewStart++;
 
-    // Visible substring from viewStart, clipped to the box width.
     char vis[132]; size_t k = 0; int16_t w = 0;
     for (size_t i = viewStart; i < n && k < sizeof(vis) - 1; i++) {
         char c = mask ? '*' : p[i]; char one[2] = { c, '\0' };
@@ -179,7 +172,35 @@ static void drawTextArea(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
     if (caretX > (int16_t)scrW - 8) caretX = (int16_t)scrW - 8;
     tft.fillRect(caretX, ty, 2, 16, fg);
 
-    // SHOW / HIDE toggle for password fields.
+    // Char count "used/max" in the top-right of the header row.
+    char cnt[20];
+    snprintf(cnt, sizeof(cnt), "%u/%u", (unsigned)n, (unsigned)(bufLen > 0 ? bufLen - 1 : 0));
+    int16_t cw = (int16_t)tft.textWidth(cnt, 2);
+    tft.fillRect((int16_t)scrW - 8 - cw, 4, cw + 6, 18, bg);
+    tft.setTextColor((uint16_t)0x8410, bg);   // gray — legible on light and dark
+    tft.setTextDatum(TR_DATUM);
+    tft.drawString(cnt, (int16_t)scrW - 6, 6, 2);
+    tft.setTextDatum(TL_DATUM);
+}
+
+// Full redraw of the whole top area (title, box frame, SHOW/HIDE toggle, text).
+static void drawTextArea(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
+                         uint16_t scrW, uint16_t scrH,
+                         const char* title, const char* buffer,
+                         size_t cursor, size_t& viewStart, size_t bufLen,
+                         bool password, bool reveal) {
+    int16_t areaH = kbY(scrH);
+    tft.fillRect(0, 0, (int16_t)scrW, areaH, bg);
+
+    int16_t y = 6;
+    if (title && title[0]) {
+        tft.setTextColor(TFT_GREEN, bg);
+        tft.drawString(title, 4, y, 2);
+        y += 22;
+    }
+    int16_t boxY = y, boxH = 26;
+    tft.drawRect(4, boxY, (int16_t)scrW - 8, boxH, fg);
+
     if (password) {
         int16_t bx, by, bw, bh;
         passToggleRect(scrW, title, bx, by, bw, bh);
@@ -191,6 +212,8 @@ static void drawTextArea(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
         tft.drawString(reveal ? "HIDE" : "SHOW", bx + bw / 2, by + bh / 2, 2);
         tft.setTextDatum(TL_DATUM);
     }
+
+    drawTextLine(tft, fg, bg, scrW, scrH, title, buffer, cursor, viewStart, bufLen, password, reveal);
 }
 
 // upper = render letters uppercase; capsMode = CAPS key look (0 off, 1 shift-once, 2 lock).
@@ -415,12 +438,14 @@ bool touchKeyboardInput(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
 
     auto upperNow = [&]() { return capsLock || shiftOnce; };
     auto capsMode = [&]() { return capsLock ? 2 : (shiftOnce ? 1 : 0); };
-    auto redrawText = [&]() { drawTextArea(tft, fg, bg, scrW, scrH, title, buffer, cursor, viewStart, password, reveal); };
+    // Partial redraw (typing / cursor move) vs. full (reveal toggle, first draw).
+    auto redrawText = [&]() { drawTextLine(tft, fg, bg, scrW, scrH, title, buffer, cursor, viewStart, bufLen, password, reveal); };
+    auto redrawAll  = [&]() { drawTextArea(tft, fg, bg, scrW, scrH, title, buffer, cursor, viewStart, bufLen, password, reveal); };
 
     const uint32_t CAPS_HOLD_MS = 450;   // hold CAPS this long → caps-lock
     const uint32_t MIN_FLASH_MS = 55;    // keep the press highlight visible at least this long
 
-    redrawText();
+    redrawAll();
     drawKeyboard(tft, fg, bg, scrW, scrH, layout, upperNow(), capsMode());
 
     for (;;) {
@@ -435,7 +460,7 @@ bool touchKeyboardInput(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
                 (int16_t)ty >= by && (int16_t)ty < by + bh) {
                 uint16_t rx, ry; while (kb_rawTouch(tft, &rx, &ry)) { delay(8); yield(); }
                 reveal = !reveal;
-                redrawText();
+                redrawAll();                 // toggle label changes too → full redraw
                 continue;
             }
         }
