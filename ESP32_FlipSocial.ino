@@ -591,150 +591,74 @@ static bool waitConnect(uint32_t timeoutMs) {
   return WiFi.status() == WL_CONNECTED;
 }
 
-// Blocking connect with on-screen progress. Tries the exact scanned AP first
-// (channel/BSSID — band-safe on the dual-band C5), then falls back to a plain
-// SSID+password attempt. Returns true on success.
-static bool connectWiFi(const String &ssid, const String &pass,
-                        int32_t channel = 0, const uint8_t *bssid = nullptr) {
+// Blocking connect with on-screen progress. FlipperHTTP's ESP32-C5 approach:
+// WiFi.setBandMode(WIFI_BAND_MODE_AUTO) + a plain WiFi.begin() — no scan, BSSID
+// pinning, or radio OFF/STA cycle. The band-mode call is what lets the dual-band
+// C5 pick 2.4/5 GHz on its own, which is what the old workarounds were faking.
+static bool connectWiFi(const String &ssid, const String &pass) {
   g_wifiConnecting = true;
-  ledSet(true);
+  ledWifi();
   tft->fillScreen(COL_BG);
   drawHeader("WiFi", false);
-  bool band5 = channel > 14;
-  statusLine((String(ssid) + "   ch " + channel + (channel ? (band5 ? " (5GHz)" : " (2.4GHz)") : "")).c_str());
+  statusLine((String("Connecting to ") + ssid + " ...").c_str());
 
   g_wifiReason = 0;
-  g_wifiEvt = -1;              // reset so we can see fresh STA events this attempt
+  g_wifiEvt = -1;
   WiFi.persistent(false);
   WiFi.setSleep(false);
-  // After WiFi.scanNetworks() the STA is left wedged — begin() produces no
-  // STA_START (last event stays SCAN_DONE/102). A gentle disconnect() doesn't
-  // clear it; fully cycle the radio OFF then back to STA for a clean start.
-  WiFi.scanDelete();
-  WiFi.disconnect(true);
-  WiFi.mode(WIFI_OFF);
-  delay(300);
+  WiFi.scanDelete();                         // free any prior scan (harmless if none)
+  WiFi.setBandMode(WIFI_BAND_MODE_AUTO);     // dual-band C5: auto-select the band
   WiFi.mode(WIFI_STA);
-  delay(200);
+  WiFi.begin(ssid.c_str(), pass.c_str());
+  WiFi.setAutoReconnect(false);
 
-  bool ok = false;
-  if (channel > 0 && bssid) {                        // Attempt 1: pinned to AP
-    tft->setTextColor(COL_FG, COL_BG);
-    tft->drawString("try 1: pinned AP", 10, 56, 2);
-    WiFi.begin(ssid.c_str(), pass.c_str(), channel, bssid);
-    ok = waitConnect(12000);
-  }
-  if (!ok) {                                         // Attempt 2: driver chooses
-    tft->fillRect(0, 56, SCRW, 20, COL_BG);
-    tft->setTextColor(COL_FG, COL_BG);
-    tft->drawString("try 2: auto", 10, 56, 2);
-    g_wifiReason = 0;
-    WiFi.disconnect();
-    delay(150);
-    WiFi.begin(ssid.c_str(), pass.c_str());
-    ok = waitConnect(12000);
-  }
+  bool ok = waitConnect(12000);
   g_wifiConnecting = false;
-  ledSet(false);
+  ledOff();
   return ok;
 }
 
-// Scan, then connect to a saved SSID pinned to its live channel/BSSID.
+// Connect to a saved network — just its stored password, no scan.
 static bool connectSaved(const String &ssid) {
-  String pass = wifiPassFor(ssid);
-  g_wifiConnecting = true;
-  ledSet(true);
-  tft->fillScreen(COL_BG);
-  drawHeader("WiFi", true);
-  statusLine((String("Scanning for ") + ssid + " ...").c_str());
-  int cnt = WiFi.scanNetworks();
-  int found = -1;
-  for (int j = 0; j < cnt; j++) if (WiFi.SSID(j) == ssid) { found = j; break; }
-  bool ok;
-  if (found >= 0) {
-    uint8_t b[6]; const uint8_t *bp = WiFi.BSSID(found); if (bp) memcpy(b, bp, 6);
-    ok = connectWiFi(ssid, pass, WiFi.channel(found), bp ? b : nullptr);
-  } else {
-    ok = connectWiFi(ssid, pass);
-  }
-  g_wifiConnecting = false;
-  ledSet(false);
-  return ok;
+  return connectWiFi(ssid, wifiPassFor(ssid));
 }
 
-// Boot auto-connect — NON-BLOCKING state machine so the main menu shows instantly
-// and WiFi associates in the background. Progress is shown by the header WiFi icon
-// (yellow=connecting) and the activity LED. Driven from loop() via wifiBgTick().
-enum WbState { WB_IDLE, WB_SCAN_POLL, WB_CYCLE_STA, WB_BEGIN, WB_CONNECT, WB_DONE };
+// Boot auto-connect — NON-BLOCKING so the main menu shows instantly and WiFi
+// associates in the background (header icon + LED show progress). No scan/cycle:
+// setBandMode(AUTO) + WiFi.begin(), poll the status, and if a saved network
+// times out, move on to the next one. Driven from loop() via wifiBgTick().
+enum WbState { WB_IDLE, WB_CONNECT, WB_DONE };
 static WbState  g_wb  = WB_IDLE;
 static uint32_t g_wbT = 0;
-static String   g_wbSsid, g_wbPass;   // chosen network, carried across states
-static int32_t  g_wbCh = 0;
-static uint8_t  g_wbBssid[6];
-static bool     g_wbHave = false;     // have a pinned channel/BSSID
+static String   g_wbSs[WIFI_MAX_SAVED], g_wbPp[WIFI_MAX_SAVED];
+static int      g_wbN = 0, g_wbIdx = 0;
+
+static void wifiBgTry() {                     // begin() on the current saved network
+  g_wifiReason = 0; g_wifiEvt = -1;
+  WiFi.begin(g_wbSs[g_wbIdx].c_str(), g_wbPp[g_wbIdx].c_str());
+  WiFi.setAutoReconnect(false);
+  g_wbT = millis();
+}
 
 static void wifiBgBegin() {
-  String ss[WIFI_MAX_SAVED], pp[WIFI_MAX_SAVED];
-  if (wifiLoad(ss, pp, WIFI_MAX_SAVED) == 0) { g_wb = WB_IDLE; return; }
+  g_wbN = wifiLoad(g_wbSs, g_wbPp, WIFI_MAX_SAVED);
+  if (g_wbN == 0) { g_wb = WB_IDLE; return; }
   WiFi.persistent(false);
   WiFi.setSleep(false);
-  WiFi.scanNetworks(true);           // async scan (STA is already up from setup)
-  g_wbT = millis();
-  g_wb  = WB_SCAN_POLL;
+  WiFi.setBandMode(WIFI_BAND_MODE_AUTO);
+  WiFi.mode(WIFI_STA);
+  g_wbIdx = 0;
+  wifiBgTry();
+  g_wb = WB_CONNECT;
   g_wifiConnecting = true;
 }
 
 static void wifiBgTick() {
-  switch (g_wb) {
-    case WB_IDLE:
-    case WB_DONE:
-      return;
-    case WB_SCAN_POLL: {
-      int r = WiFi.scanComplete();
-      if (r == WIFI_SCAN_RUNNING) {              // still scanning
-        if (millis() - g_wbT > 8000) { WiFi.scanDelete(); g_wifiConnecting = false; g_wb = WB_DONE; }
-        return;
-      }
-      String ss[WIFI_MAX_SAVED], pp[WIFI_MAX_SAVED];
-      int nsv = wifiLoad(ss, pp, WIFI_MAX_SAVED);
-      int pick = -1, netIdx = -1;
-      if (r > 0)
-        for (int i = 0; i < nsv && pick < 0; i++)
-          for (int j = 0; j < r; j++)
-            if (WiFi.SSID(j) == ss[i]) { pick = j; netIdx = i; break; }
-      if (pick >= 0) {
-        g_wbSsid = ss[netIdx]; g_wbPass = pp[netIdx];
-        g_wbCh   = WiFi.channel(pick);
-        const uint8_t *bp = WiFi.BSSID(pick);
-        g_wbHave = (bp != nullptr);
-        if (bp) memcpy(g_wbBssid, bp, 6);
-      } else {
-        g_wbSsid = ss[0]; g_wbPass = pp[0]; g_wbHave = false;   // best effort
-      }
-      WiFi.scanDelete();
-      // Cycle the radio AFTER the scan, BEFORE begin() — clears the post-scan
-      // STA wedge on the C5 (settle time handled by the timed states below).
-      WiFi.disconnect(true);
-      WiFi.mode(WIFI_OFF);
-      g_wbT = millis(); g_wb = WB_CYCLE_STA;
-      return;
-    }
-    case WB_CYCLE_STA:
-      if (millis() - g_wbT < 300) return;
-      WiFi.mode(WIFI_STA);
-      g_wbT = millis(); g_wb = WB_BEGIN;
-      return;
-    case WB_BEGIN:
-      if (millis() - g_wbT < 200) return;
-      g_wifiReason = 0; g_wifiEvt = -1;
-      if (g_wbHave) WiFi.begin(g_wbSsid.c_str(), g_wbPass.c_str(), g_wbCh, g_wbBssid);
-      else          WiFi.begin(g_wbSsid.c_str(), g_wbPass.c_str());
-      g_wbT = millis(); g_wb = WB_CONNECT;
-      return;
-    case WB_CONNECT:
-      if (WiFi.status() == WL_CONNECTED) { g_wifiConnecting = false; g_wb = WB_DONE; return; }
-      if (millis() - g_wbT > 15000)      { g_wifiConnecting = false; g_wb = WB_DONE; return; }
-      return;
+  if (g_wb != WB_CONNECT) return;
+  if (WiFi.status() == WL_CONNECTED) { g_wifiConnecting = false; g_wb = WB_DONE; return; }
+  if (millis() - g_wbT > 10000) {             // this network timed out — try the next
+    if (++g_wbIdx >= g_wbN) { g_wifiConnecting = false; g_wb = WB_DONE; return; }
+    wifiBgTry();
   }
 }
 
@@ -787,14 +711,12 @@ static void scanFlow() {
     int idx = sel - 1;
     if (idx < 0 || idx >= rc) continue;
     String ssid = WiFi.SSID(idx);
-    int32_t ch = WiFi.channel(idx);
-    uint8_t b[6]; const uint8_t *bp = WiFi.BSSID(idx); if (bp) memcpy(b, bp, 6);
     char pass[65] = {0};
     String sp = wifiPassFor(ssid);
     if (sp.length()) strncpy(pass, sp.c_str(), sizeof(pass) - 1);
     if (!touchKeyboardInput(*tft, COL_FG, COL_BG, pass, sizeof(pass),
                             (String("Password: ") + ssid).c_str(), true)) continue;
-    if (connectWiFi(ssid, pass, ch, bp ? b : nullptr)) {
+    if (connectWiFi(ssid, pass)) {
       wifiSave(ssid, pass);
       statusLine("Connected!", COL_OK);
       uint16_t a, bb; waitTap(a, bb);
