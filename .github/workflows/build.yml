@@ -82,9 +82,13 @@ jobs:
           ref: ESP32-C5
           path: TFT_eSPI-ESP32-C5
 
+      # The TFT fork ships the driver, not the board User_Setup files. Copy the
+      # ones bundled in this repo into the library and point Select.h at ours.
       - name: Select TFT User_Setup for ${{ matrix.board }}
         run: |
+          cp User_Setup_*.h TFT_eSPI-ESP32-C5/
           echo "#include <${{ matrix.tft_setup }}.h>" > TFT_eSPI-ESP32-C5/User_Setup_Select.h
+          ls TFT_eSPI-ESP32-C5/User_Setup_*.h
           cat TFT_eSPI-ESP32-C5/User_Setup_Select.h
 
       # Arduino IDE can't inject git data — stamp the short SHA into FW_COMMIT.
