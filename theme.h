@@ -1,6 +1,6 @@
 // theme.h
 // Theme + accent + font-colour + brightness system for Pancake Picoware, ported
-// from the ESP32_Bible firmware (GitHub/H4W9/ESP32_Bible). Named colour themes
+// from the H4W9 firmware (GitHub/H4W9). Named colour themes
 // (bg/fg/header/dim); a 24-colour accent palette AND a 24-entry font-colour
 // palette, each remembered PER THEME with a "Default" option; brightness. All
 // persisted to SPIFFS (Marauder-style).
@@ -59,7 +59,7 @@ static const char *const PW_ACCENT_NAMES[] = {
 };
 static const uint8_t PW_ACCENT_COUNT = 24;
 
-// ── Font-colour palette (ESP32_Bible Font Color). Index 0 = "Default" (theme fg).
+// ── Font-colour palette (H4W9 Font Color). Index 0 = "Default" (theme fg).
 static const char *const PW_FONTCOL_NAMES[] = {
     "Default", "White", "Silver", "Light Gray", "Gray", "Dim Gray",
     "Dark Gray", "Charcoal", "Black",
@@ -101,7 +101,7 @@ struct Theme {
     uint8_t f = fcSel();
     return (f == 0 || f >= PW_FONTCOL_COUNT) ? themeFg() : PW_FONTCOL_VAL[f];
   }
-  // Per-theme "Default" accent: blend bg toward fg ~32% (ESP32_Bible themeHighlight).
+  // Per-theme "Default" accent: blend bg toward fg ~32% (H4W9 themeHighlight).
   uint16_t themeHighlight() const {
     uint16_t a = bg(), b = themeFg();
     int ar = (a >> 11) & 0x1F, ag = (a >> 5) & 0x3F, ab = a & 0x1F;

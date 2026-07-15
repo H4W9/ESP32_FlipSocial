@@ -5,7 +5,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Pancake Picoware — hardware config
 //   Board: ESP32-C5, ST7796 320×480, FT6336 capacitive touch (I2C), PSRAM, SD.
-//   This mirrors the MARAUDER_PANCAKE block from the Bible firmware so the shared
+//   This mirrors the MARAUDER_PANCAKE block from the H4W9 firmware so the shared
 //   assets (ft6336.h, touch keyboard) compile unchanged.
 // ─────────────────────────────────────────────────────────────────────────────
 

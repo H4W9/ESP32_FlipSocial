@@ -1,6 +1,6 @@
 // TouchKeyboard.h
 // Self-contained touch QWERTY keyboard for Pancake Picoware.
-// Modeled on the ESP32_Bible touch keyboard (bibleKeyboardInput) but stripped of
+// Modeled on the H4W9 touch keyboard (a self-contained touch keyboard) but stripped of
 // the VLW-font / German / search-option baggage: uses built-in TFT_eSPI fonts,
 // draws directly to the panel, and returns plain ASCII.
 //

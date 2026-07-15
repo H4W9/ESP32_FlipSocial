@@ -1,7 +1,7 @@
 /* ============================================================================
    ESP32 FlipSocial — Pancake (ESP32-C5, ST7796 320x480, FT6336 capacitive touch)
    ============================================================================
-   Standalone touch firmware. Bible-firmware-style UI shell (list menus, header
+   Standalone touch firmware. list-menu UI shell (list menus, header
    with back button + WiFi icon + battery %, footer nav bar) over Picoware's
    panel/touch/HTTP core. Settings + credentials persist to SPIFFS.
 
@@ -29,7 +29,7 @@
 #include "TouchKeyboard.h"
 #include "theme.h"
 
-// Picoware core (panel init, touch, HTTP). FlipSocial is a native Bible-style app
+// Picoware core (panel init, touch, HTTP). FlipSocial is a native H4W9-style app
 // in this sketch, so Picoware's own flip_social views are not used.
 #include "src/Picoware/internal/boards.hpp"
 #include "src/Picoware/internal/gui/draw.hpp"
@@ -60,7 +60,7 @@ static const uint16_t COL_OK = 0x07E0;   // status green (theme-independent)
 static const int SCRW = 320;
 static const int SCRH = 480;
 
-// Shell layout — matches ESP32_Bible (header 28, nav 28, list rows 34).
+// Shell layout — matches H4W9 (header 28, nav 28, list rows 34).
 static const int HDRH     = 28;
 static const int NAVH     = 28;
 static const int ITEMH    = 34;
@@ -258,7 +258,7 @@ static void drawHeaderStatus() {
     snprintf(pct, sizeof(pct), "%d%%", g_battPct);
     tft->setTextColor(COL_FG, COL_ACCENT);
     tft->setTextDatum(MR_DATUM);
-    tft->drawString(pct, rx, HDRH / 2, 1);             // small (font 1) like ESP32_Bible
+    tft->drawString(pct, rx, HDRH / 2, 1);             // small (font 1) like H4W9
     rx -= tft->textWidth(pct, 1) + 8;                  // slot the icon left of the %
   }
 
@@ -274,7 +274,7 @@ static void drawHeaderStatus() {
   tft->setTextDatum(TL_DATUM);
 }
 
-// Crisp vector chevron "<"/">" (solid triangle) — matches ESP32_Bible selectors.
+// Crisp vector chevron "<"/">" (solid triangle) — matches H4W9 selectors.
 static void drawChevron(int bx, int by, int bw, int bh, bool right, uint16_t col) {
   int cx = bx + bw / 2, cy = by + bh / 2;
   if (right) tft->fillTriangle(cx - 3, cy - 5, cx - 3, cy + 5, cx + 4, cy, col);
@@ -287,7 +287,7 @@ static void drawPlusMinus(int bx, int by, int bw, int bh, bool plus, uint16_t co
   if (plus) tft->fillRect(cx - 1, cy - r, 2, 2 * r, col); // vertical
 }
 
-// ESP32_Bible-style header: optional back box with chevron (top-left), centred
+// H4W9-style header: optional back box with chevron (top-left), centred
 // title, status corner (WiFi icon + battery %) top-right.
 static void drawHeader(const String &title, bool showBack) {
   tft->fillRect(0, 0, SCRW, HDRH, COL_ACCENT);
@@ -306,7 +306,7 @@ static bool backTapped(uint16_t x, uint16_t y) {
   return (int)y < HDRH && (int)x < 48;   // top-left back box
 }
 
-// Footer nav bar (Bible-style): up to three labelled rounded buttons in thirds.
+// Footer nav bar (H4W9-style): up to three labelled rounded buttons in thirds.
 static void drawNav(const char *l, const char *m, const char *r) {
   int y = SCRH - NAVH, third = SCRW / 3, bh = NAVH - 10, by = y + 5, bw = third - 10;
   tft->fillRect(0, y, SCRW, NAVH, COL_BG);
@@ -330,7 +330,7 @@ static int navHit(uint16_t x, uint16_t y) {
   return c > 2 ? 2 : c;
 }
 
-// One list row (ESP32_Bible-style): fill, left text, optional right chevron, divider.
+// One list row (H4W9-style): fill, left text, optional right chevron, divider.
 static void drawListRow(int y, const String &text, bool sel, bool arrow) {
   uint16_t bgc = sel ? COL_SEL : COL_BG;
   tft->fillRect(0, y, SCRW, ITEMH, bgc);
@@ -356,7 +356,7 @@ static void drawRowSprite(TFT_eSprite &spr, int y, const String &text, bool arro
   spr.setTextDatum(TL_DATUM);
 }
 
-// Bible-style scrollbar drawn into a sprite: track + thumb at the right edge.
+// H4W9-style scrollbar drawn into a sprite: track + thumb at the right edge.
 // `viewH` = visible height, `total` = content height, `scroll` = current offset.
 static void sprScrollBar(TFT_eSprite &spr, int viewH, int total, float scroll) {
   if (total <= viewH) return;
@@ -474,7 +474,7 @@ static void statusLine(const char *msg, uint16_t col = 0xFFFF) {
 }
 
 // ── Settings chip rows: label + [<] value [>] (or [-] value [+]) ─────────────
-// ── Settings rows (ESP32_Bible choiceRow layout) ─────────────────────────────
+// ── Settings rows (H4W9 choiceRow layout) ─────────────────────────────
 // [<] value [>] with fixed-right buttons (28x22). Selected row highlights with
 // sel_bg. `valcol` = colour to draw the value text (0 = follow font colour).
 static const int CHIP_W = 28, CHIP_H = 22;
@@ -699,16 +699,14 @@ static void scanFlow() {
     ledSet(false);
     int rc = (nnet < 0) ? 0 : nnet;
 
-    int n = 0;
-    rows[n++] = "Rescan";
-    for (int i = 0; i < rc && n < 41; i++)
-      rows[n++] = WiFi.SSID(i) + "  (" + WiFi.RSSI(i) + ")";
+    for (int i = 0; i < rc && i < 41; i++)
+      rows[i] = WiFi.SSID(i) + "  (" + WiFi.RSSI(i) + ")";
 
-    int sel = scrollList("Scan", rows, n, true);
-    if (sel < 0) return;                               // Back
-    if (sel == 0) continue;                            // Rescan
+    int sel = scrollList("Scan", rows, rc, true, "Back", "Rescan", "");
+    if (sel == SL_BACK || sel == SL_F0) return;        // Back
+    if (sel == SL_F1) continue;                        // Rescan
 
-    int idx = sel - 1;
+    int idx = sel;
     if (idx < 0 || idx >= rc) continue;
     String ssid = WiFi.SSID(idx);
     char pass[65] = {0};
@@ -785,7 +783,7 @@ static void wifiDebug() {
   }
 }
 
-// ── Settings (ESP32_Bible layout: highlight on tap, partial redraw, no flash) ──
+// ── Settings (H4W9 layout: highlight on tap, partial redraw, no flash) ──
 static const int SET_N = 9;   // + About (Theme, Accent, Font Color, Brightness, WiFi, Debug, User, Pass, About)
 // Value string for the two chip rows that need it for hit-testing.
 static String setChipVal(int row) {
@@ -814,7 +812,7 @@ static void drawSettingRow(int row, int sel) {
   }
 }
 
-// About — app info + credits (JBlanked's FlipSocial, Picoware, ESP32 Bible UI).
+// About — app info + credits (JBlanked's FlipSocial, Picoware, H4W9 UI).
 static void aboutScreen() {
   tft->fillScreen(COL_BG);
   drawHeader("About", true);
@@ -833,7 +831,7 @@ static void aboutScreen() {
   tft->setTextColor(COL_DIM, COL_BG);
   tft->drawString("jblanked.com/flipper", SCRW / 2, y, 2); y += 28;
   tft->drawString("Engine: Picoware", SCRW / 2, y, 2); y += 20;
-  tft->drawString("UI: ESP32 Bible", SCRW / 2, y, 2); y += 20;
+  tft->drawString("UI: H4W9", SCRW / 2, y, 2); y += 20;
   tft->setTextDatum(TL_DATUM);
   statusLine("Tap to go back.", COL_DIM);
   uint16_t x, ty; waitTap(x, ty);
@@ -889,7 +887,7 @@ static void settingsFlow() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  FlipSocial — native Bible-style client (chat bubbles, smooth scroll, flips,
+//  FlipSocial — native H4W9-style client (chat bubbles, smooth scroll, flips,
 //  comments, feed paging). Uses the jblanked.com feed API.
 // ═════════════════════════════════════════════════════════════════════════════
 #define FS_MAX 40
@@ -1273,7 +1271,7 @@ static FSVResult fsViewer(FSMsg *arr, int n, const String &title, int mode, uint
     if (mode == FS_FEED)          drawNav("< Prev", "+ New Post", "Next >");
     else if (mode == FS_COMMENTS) drawNav("", "+ Add Comment", "");
     else if (mode == FS_MESSAGES) drawNav("< Prev", "+ Send", "Next >");
-    else                          drawNav("", "", "");   // My Posts: read-only
+    else                          drawNav("< Prev", "", "Next >");   // My Posts: page-only
   };
 
   float scroll = 0, fling = 0;
@@ -1342,6 +1340,9 @@ static FSVResult fsViewer(FSMsg *arr, int n, const String &title, int mode, uint
               n = fsLoadMessages(arr, g_msgPeer); relayout(); scroll = 0;
               tft->fillScreen(COL_BG); drawHeader(title, true); footer();
             }
+          } else if (mode == FS_MYPOSTS) {
+            if (nh == 0) { spr.deleteSprite(); return FSV_PREV; }   // previous page
+            if (nh == 2) { spr.deleteSprite(); return FSV_NEXT; }   // next page
           }
           need = true;
         } else if ((int)pY >= HDRH) {                      // tapped a bubble
@@ -1413,29 +1414,25 @@ static FSVResult messagesThreadScreen(const String &peer) {
   return fsViewer(msgs, n, String("@") + peer, FS_MESSAGES, 0, 0);
 }
 
-// Messages — conversation list (+ "New Message"). Tap a user to open the thread;
-// Prev/Next in the thread page through the conversation list.
+// Messages — conversation list with a [Back][+ New Msg] footer. Tap a user to open
+// the thread; Prev/Next in the thread page through the conversation list.
 static void messagesScreen() {
   static String users[40];
-  static String rows[41];
   for (;;) {
     tft->fillScreen(COL_BG); drawHeader("Messages", true);
     tft->setTextColor(COL_DIM, COL_BG); tft->setTextDatum(MC_DATUM);
     tft->drawString("Loading...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
     int n = fsLoadMsgUsers(users, 40);
-    int r = 0;
-    rows[r++] = "+ New Message";
-    for (int i = 0; i < n && r < 41; i++) rows[r++] = users[i];
-    int sel = scrollList("Messages", rows, r, true);
-    if (sel < 0) return;
-    if (sel == 0) {                                    // start a new conversation
+    int sel = scrollList("Messages", users, n, true, "Back", "+ New Msg", "");
+    if (sel == SL_BACK || sel == SL_F0) return;
+    if (sel == SL_F1) {                                // start a new conversation
       char b[64] = {0};
       if (touchKeyboardInput(*tft, COL_FG, COL_BG, b, sizeof(b), "Message to (username):", false) && strlen(b)) {
         FSVResult rr;
         do { rr = messagesThreadScreen(String(b)); } while (rr != FSV_BACK);   // no list to page
       }
-    } else if (n > 0) {
-      int cur = sel - 1;
+    } else if (sel >= 0 && sel < n) {                  // open a conversation; page with Prev/Next
+      int cur = sel;
       for (;;) {
         FSVResult rr = messagesThreadScreen(users[cur]);
         if (rr == FSV_BACK) break;
@@ -1491,18 +1488,20 @@ static bool confirmDialog(const String &title, const String &sub) {
 // dedicated profile endpoint exists in the API). Read-only viewer.
 static void myPostsScreen() {
   static FSMsg mine[FS_MAX], buf[FS_MAX];
-  tft->fillScreen(COL_BG); drawHeader("My Posts", true);
-  tft->setTextColor(COL_DIM, COL_BG); tft->setTextDatum(MC_DATUM);
-  tft->drawString("Loading...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
-  String me = fsUser();
-  int cnt = 0;
-  for (int series = 1; series <= 3 && cnt < FS_MAX; series++) {
-    int n = fsLoadFeed(buf, series);
+  int series = 1;
+  for (;;) {
+    tft->fillScreen(COL_BG); drawHeader("My Posts", true);
+    tft->setTextColor(COL_DIM, COL_BG); tft->setTextDatum(MC_DATUM);
+    tft->drawString("Loading...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
+    String me = fsUser();
+    int cnt = 0, n = fsLoadFeed(buf, series);
     for (int i = 0; i < n && cnt < FS_MAX; i++)
       if (buf[i].user == me) mine[cnt++] = buf[i];
-    if (n == 0) break;
+    FSVResult r = fsViewer(mine, cnt, String("My Posts  p") + series, FS_MYPOSTS, 0, series);
+    if (r == FSV_BACK) return;
+    if (r == FSV_NEXT) series++;
+    else if (r == FSV_PREV && series > 1) series--;
   }
-  fsViewer(mine, cnt, "My Posts", FS_MYPOSTS, 0, 0);
 }
 
 // View Profile — bio, friends count, join date (GET /user/profile/{who}).
@@ -1615,7 +1614,7 @@ static void exploreUserScreen(const String &who) {
 
 // Explore — search users by keyword, then act on a result.
 static void exploreScreen() {
-  static String users[40], rows[41];
+  static String users[40];
   char kw[64] = {0};
   if (!touchKeyboardInput(*tft, COL_FG, COL_BG, kw, sizeof(kw), "Search users:", false) || strlen(kw) == 0)
     return;
@@ -1624,23 +1623,19 @@ static void exploreScreen() {
     tft->setTextColor(COL_DIM, COL_BG); tft->setTextDatum(MC_DATUM);
     tft->drawString("Searching...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
     int n = fsExplore(String(kw), users, 40);
-    int r = 0;
-    rows[r++] = "+ New Search";
-    for (int i = 0; i < n && r < 41; i++) rows[r++] = users[i];
-    int sel = scrollList(String("Explore: ") + kw, rows, r, true);
-    if (sel < 0) return;
-    if (sel == 0) {                                    // new search
+    int sel = scrollList(String("Explore: ") + kw, users, n, true, "Back", "+ Search", "");
+    if (sel == SL_BACK || sel == SL_F0) return;
+    if (sel == SL_F1) {                                // new search
       kw[0] = 0;
       if (!touchKeyboardInput(*tft, COL_FG, COL_BG, kw, sizeof(kw), "Search users:", false) || strlen(kw) == 0)
         return;
       continue;
     }
-    int idx = sel - 1;
-    if (idx >= 0 && idx < n) exploreUserScreen(users[idx]);
+    if (sel >= 0 && sel < n) exploreUserScreen(users[sel]);
   }
 }
 
-// ── Main menu (ESP32_Bible-style large rounded buttons) ───────────────────────
+// ── Main menu (H4W9-style large rounded buttons) ───────────────────────
 static const char *MENU_ITEMS[] = { "Feed", "New Post", "Messages", "Explore", "Profile", "Settings" };
 static const int    MENU_COUNT  = 6;
 static const int    MENU_MARGIN = 16;
@@ -1705,18 +1700,17 @@ static void mainMenuRun(ViewManager *viewManager) {
   }
   wasDown = down;
 
-  // Idle refresh: header WiFi icon + battery. Repaint promptly when the WiFi
-  // state changes (connecting -> connected, drops, etc.), else periodically.
+  // Idle refresh of ONLY the header status corner (WiFi icon + battery). The menu
+  // buttons don't depend on WiFi, so never repaint the whole screen here — doing so
+  // made the menu flash repeatedly while the background connect cycled states.
   static uint32_t lastRefresh = 0;
   static int lastStatus = -2;
   static bool lastConn = false;
   if (WiFi.status() != lastStatus || g_wifiConnecting != lastConn || millis() - lastRefresh > 4000) {
     lastRefresh = millis();
-    bool statusChanged = (WiFi.status() != lastStatus);
-    lastStatus = WiFi.status();
-    lastConn   = g_wifiConnecting;
-    if (statusChanged) drawMenu();       // SSID text on the menu may change too
-    else               drawHeaderStatus();
+    lastStatus  = WiFi.status();
+    lastConn    = g_wifiConnecting;
+    drawHeaderStatus();
   }
 }
 
