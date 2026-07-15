@@ -635,11 +635,11 @@ static bool connectSaved(const String &ssid) {
   return connectWiFi(ssid, wifiPassFor(ssid));
 }
 
-// Boot auto-connect — NON-BLOCKING so the main menu shows instantly and WiFi
-// associates in the background (header icon + LED show progress). No scan/cycle:
-// setBandMode(AUTO) + WiFi.begin(), poll the status, and if a saved network
-// times out, move on to the next one. Driven from loop() via wifiBgTick().
-enum WbState { WB_IDLE, WB_CONNECT, WB_DONE };
+// Background (re)connect — NON-BLOCKING so the menu stays responsive. An async
+// scan orders the saved networks by signal strength (closest first); then it
+// connects to each in turn (setBandMode(AUTO) + WiFi.begin(), poll, next on
+// timeout). Driven from loop() via wifiBgTick(); retriggered by loop() on loss.
+enum WbState { WB_IDLE, WB_SCAN, WB_CONNECT, WB_DONE };
 static WbState  g_wb  = WB_IDLE;
 static uint32_t g_wbT = 0;
 static String   g_wbSs[WIFI_MAX_SAVED], g_wbPp[WIFI_MAX_SAVED];
@@ -659,18 +659,46 @@ static void wifiBgBegin() {
   WiFi.setSleep(false);
   WiFi.setBandMode(WIFI_BAND_MODE_AUTO);
   WiFi.mode(WIFI_STA);
-  g_wbIdx = 0;
-  wifiBgTry();
-  g_wb = WB_CONNECT;
+  WiFi.scanNetworks(true);                    // async — order by RSSI when it completes
+  g_wbT = millis();
+  g_wb = WB_SCAN;
   g_wifiConnecting = true;
 }
 
 static void wifiBgTick() {
-  if (g_wb != WB_CONNECT) return;
-  if (WiFi.status() == WL_CONNECTED) { g_wifiConnecting = false; g_wb = WB_DONE; return; }
-  if (millis() - g_wbT > 10000) {             // this network timed out — try the next
-    if (++g_wbIdx >= g_wbN) { g_wifiConnecting = false; g_wb = WB_DONE; return; }
+  if (g_wb == WB_SCAN) {
+    int r = WiFi.scanComplete();
+    if (r == WIFI_SCAN_RUNNING && millis() - g_wbT < 6000) return;   // wait for the scan (<=6s)
+    if (r > 0) {
+      // Best RSSI of each saved net (−999 = out of range), then sort desc (closest first).
+      int rssi[WIFI_MAX_SAVED];
+      for (int i = 0; i < g_wbN; i++) {
+        rssi[i] = -999;
+        for (int j = 0; j < r; j++)
+          if (WiFi.SSID(j) == g_wbSs[i] && WiFi.RSSI(j) > rssi[i]) rssi[i] = WiFi.RSSI(j);
+      }
+      for (int a = 0; a < g_wbN - 1; a++) {
+        int best = a;
+        for (int b = a + 1; b < g_wbN; b++) if (rssi[b] > rssi[best]) best = b;
+        if (best != a) {
+          int tr = rssi[a]; rssi[a] = rssi[best]; rssi[best] = tr;
+          String ts = g_wbSs[a]; g_wbSs[a] = g_wbSs[best]; g_wbSs[best] = ts;
+          String tp = g_wbPp[a]; g_wbPp[a] = g_wbPp[best]; g_wbPp[best] = tp;
+        }
+      }
+    }
+    WiFi.scanDelete();
+    g_wbIdx = 0;
     wifiBgTry();
+    g_wb = WB_CONNECT;
+    return;
+  }
+  if (g_wb == WB_CONNECT) {
+    if (WiFi.status() == WL_CONNECTED) { g_wifiConnecting = false; g_wb = WB_DONE; return; }
+    if (millis() - g_wbT > 10000) {           // this network timed out — try the next
+      if (++g_wbIdx >= g_wbN) { g_wifiConnecting = false; g_wb = WB_DONE; return; }
+      wifiBgTry();
+    }
   }
 }
 
@@ -914,7 +942,8 @@ static const int FS_LH = 18;          // line height (font 2)
 static const int FS_BM = 8;           // bubble margin
 static const int FS_BP = 8;           // bubble padding
 enum { FS_FEED = 0, FS_COMMENTS = 1, FS_MYPOSTS = 2, FS_MESSAGES = 3 };
-static String g_msgPeer;   // current message-thread peer (for reload/send)
+static String g_msgPeer;              // current message-thread peer (for reload/send)
+static bool   g_usingCache = false;   // on-screen data came from the SD cache (offline)
 
 static String fsUser() { return credGet("user"); }
 
@@ -930,6 +959,43 @@ static String fsRequest(const char *method, const String &url, const String &pay
   return r;
 }
 
+// ── Offline cache (SD /fs_cache) ─────────────────────────────────────────────
+// Feed / comments / messages / profile responses are cached to SD so they can be
+// shown when WiFi is down. Sets g_usingCache when the on-screen data is from cache.
+static String cacheName(const char *prefix, const String &key) {
+  String s = "/fs_cache/"; s += prefix;
+  for (size_t i = 0; i < key.length(); i++) {
+    char c = key[i];
+    bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    s += ok ? c : '_';
+  }
+  s += ".json";
+  return s;
+}
+static void cacheWrite(const String &path, const String &content) {
+  if (!SD.exists("/fs_cache")) SD.mkdir("/fs_cache");
+  File f = SD.open(path, FILE_WRITE);
+  if (!f) return;
+  f.print(content);
+  f.close();
+}
+static String cacheRead(const String &path) {
+  File f = SD.open(path, FILE_READ);
+  if (!f) return "";
+  String s = f.readString();
+  f.close();
+  return s;
+}
+// GET with caching: on a valid response (contains `marker`) refresh the cache and
+// return it; otherwise (offline / failed) fall back to the last cached copy.
+static String fsGetCached(const String &url, const String &cachePath, const char *marker) {
+  String resp;
+  if (WiFi.status() == WL_CONNECTED) resp = fsRequest("GET", url);
+  if (resp.indexOf(marker) >= 0) { cacheWrite(cachePath, resp); g_usingCache = false; return resp; }
+  g_usingCache = true;
+  return cacheRead(cachePath);
+}
+
 static bool fsBool(JsonVariant v) {
   if (v.is<bool>()) return v.as<bool>();
   String s = v.as<String>();
@@ -938,7 +1004,7 @@ static bool fsBool(JsonVariant v) {
 
 static int fsLoadFeed(FSMsg *arr, int series) {
   String url = "https://www.jblanked.com/flipper/api/feed/20/" + fsUser() + "/" + String(series) + "/max/series/";
-  String resp = fsRequest("GET", url);
+  String resp = fsGetCached(url, cacheName("feed_", fsUser() + "_" + series), "\"feed\"");
   JsonDocument doc;
   if (deserializeJson(doc, resp)) return 0;
   JsonArray f = doc["feed"].as<JsonArray>();
@@ -960,7 +1026,7 @@ static int fsLoadFeed(FSMsg *arr, int series) {
 
 static int fsLoadComments(FSMsg *arr, uint32_t postId) {
   String url = "https://www.jblanked.com/flipper/api/feed/comments/20/" + fsUser() + "/" + String(postId) + "/";
-  String resp = fsRequest("GET", url);
+  String resp = fsGetCached(url, cacheName("cmt_", String(postId)), "\"comments\"");
   JsonDocument doc;
   if (deserializeJson(doc, resp)) return 0;
   JsonArray f = doc["comments"].as<JsonArray>();
@@ -1010,7 +1076,8 @@ static String fsReason(const String &resp) {
 // GET /user/profile/{user}/ -> {"bio","friends_count","date_created"}
 static FSProfile fsLoadProfile(const String &who) {
   FSProfile p; p.ok = false; p.friends = 0;
-  String resp = fsRequest("GET", "https://www.jblanked.com/flipper/api/user/profile/" + who + "/");
+  String url = "https://www.jblanked.com/flipper/api/user/profile/" + who + "/";
+  String resp = fsGetCached(url, cacheName("prof_", who), "\"friends_count\"");
   JsonDocument doc;
   if (deserializeJson(doc, resp)) return p;
   if (doc["bio"].isNull() && doc["friends_count"].isNull()) return p;
@@ -1028,7 +1095,7 @@ static bool fsChangeBio(const String &bio) {
 // GET /user/friends/{user}/{max}/ -> {"friends":[username, ...]}
 static int fsLoadFriends(String *arr, int maxN) {
   String url = "https://www.jblanked.com/flipper/api/user/friends/" + fsUser() + "/" + String(maxN) + "/";
-  String resp = fsRequest("GET", url);
+  String resp = fsGetCached(url, cacheName("frnd_", fsUser()), "\"friends\"");
   JsonDocument doc;
   if (deserializeJson(doc, resp)) return 0;
   JsonArray f = doc["friends"].as<JsonArray>();
@@ -1052,7 +1119,7 @@ static bool fsRemoveFriend(const String &friendName) {
 // GET /messages/{me}/get/list/{max}/ -> {"users":[username, ...]} (conversations)
 static int fsLoadMsgUsers(String *arr, int maxN) {
   String url = "https://www.jblanked.com/flipper/api/messages/" + fsUser() + "/get/list/" + String(maxN) + "/";
-  String resp = fsRequest("GET", url);
+  String resp = fsGetCached(url, cacheName("msglist_", fsUser()), "\"users\"");
   JsonDocument doc;
   if (deserializeJson(doc, resp)) return 0;
   JsonArray u = doc["users"].as<JsonArray>();
@@ -1064,7 +1131,7 @@ static int fsLoadMsgUsers(String *arr, int maxN) {
 // GET /messages/{me}/get/{peer}/{max}/ -> {"conversations":[{"sender","content","date_created"}]}
 static int fsLoadMessages(FSMsg *arr, const String &peer) {
   String url = "https://www.jblanked.com/flipper/api/messages/" + fsUser() + "/get/" + peer + "/40/";
-  String resp = fsRequest("GET", url);
+  String resp = fsGetCached(url, cacheName("msg_", peer), "\"conversations\"");
   JsonDocument doc;
   if (deserializeJson(doc, resp)) return 0;
   JsonArray c = doc["conversations"].as<JsonArray>();
@@ -1309,9 +1376,19 @@ static FSVResult fsViewer(FSMsg *arr, int n, const String &title, int mode, uint
       if (y + hh[i] < 0 || y > SPR_H) continue;
       fsDrawBubble(spr, arr[i], y, i, mode);
     }
-    if (n == 0) { spr.setTextColor(COL_DIM, COL_BG); spr.setTextDatum(TL_DATUM);
-                  spr.drawString(mode == FS_COMMENTS ? "No comments yet."
-                               : mode == FS_MESSAGES ? "No messages yet." : "No posts.", 12, 10, 2); }
+    if (n == 0) {
+      spr.setTextDatum(TL_DATUM);
+      if (g_usingCache) {
+        spr.setTextColor(TFT_RED, COL_BG);
+        spr.drawString("Offline - no cached data yet.", 12, 10, 2);
+        spr.setTextColor(COL_DIM, COL_BG);
+        spr.drawString("Connect to WiFi to load.", 12, 30, 2);
+      } else {
+        spr.setTextColor(COL_DIM, COL_BG);
+        spr.drawString(mode == FS_COMMENTS ? "No comments yet."
+                     : mode == FS_MESSAGES ? "No messages yet." : "No posts.", 12, 10, 2);
+      }
+    }
     sprScrollBar(spr, SPR_H, total, scroll);
     spr.pushSprite(0, HDRH);
   };
@@ -1402,7 +1479,7 @@ static int fsCommentsScreen(uint32_t postId) {
   tft->setTextColor(COL_DIM, COL_BG); tft->setTextDatum(MC_DATUM);
   tft->drawString("Loading...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
   int k = fsLoadComments(cm, postId);
-  fsViewer(cm, k, "Comments", FS_COMMENTS, postId, 0);
+  fsViewer(cm, k, g_usingCache ? "Comments [offline]" : "Comments", FS_COMMENTS, postId, 0);
   return g_commentsAdded;
 }
 
@@ -1414,7 +1491,8 @@ static void feedScreen() {
     tft->setTextColor(COL_DIM, COL_BG); tft->setTextDatum(MC_DATUM);
     tft->drawString("Loading feed...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
     int n = fsLoadFeed(feed, series);
-    FSVResult r = fsViewer(feed, n, String("Feed  p") + series, FS_FEED, 0, series);
+    String title = String("Feed  p") + series + (g_usingCache ? "  [offline]" : "");
+    FSVResult r = fsViewer(feed, n, title, FS_FEED, 0, series);
     if (r == FSV_BACK) return;
     if (r == FSV_NEXT) series++;
     else if (r == FSV_PREV && series > 1) series--;
@@ -1430,7 +1508,7 @@ static FSVResult messagesThreadScreen(const String &peer) {
   tft->setTextColor(COL_DIM, COL_BG); tft->setTextDatum(MC_DATUM);
   tft->drawString("Loading...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
   int n = fsLoadMessages(msgs, peer);
-  return fsViewer(msgs, n, String("@") + peer, FS_MESSAGES, 0, 0);
+  return fsViewer(msgs, n, String("@") + peer + (g_usingCache ? "  [offline]" : ""), FS_MESSAGES, 0, 0);
 }
 
 // Messages — conversation list with a [Back][+ New Msg] footer. Tap a user to open
@@ -1442,7 +1520,7 @@ static void messagesScreen() {
     tft->setTextColor(COL_DIM, COL_BG); tft->setTextDatum(MC_DATUM);
     tft->drawString("Loading...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
     int n = fsLoadMsgUsers(users, 40);
-    int sel = scrollList("Messages", users, n, true, "Back", "+ New Msg", "");
+    int sel = scrollList(g_usingCache ? "Messages [offline]" : "Messages", users, n, true, "Back", "+ New Msg", "");
     if (sel == SL_BACK || sel == SL_F0) return;
     if (sel == SL_F1) {                                // start a new conversation
       char b[64] = {0};
@@ -1463,16 +1541,21 @@ static void messagesScreen() {
 }
 
 // Guard: FlipSocial actions need WiFi + a username.
-static bool fsReady() {
-  if (WiFi.status() != WL_CONNECTED) {
-    msgScreen("FlipSocial", "Connect WiFi first", "Settings > WiFi Setup", TFT_RED);
-    return false;
-  }
+// Just a username set — enough to VIEW cached data offline.
+static bool fsUserSet() {
   if (fsUser().length() == 0) {
     msgScreen("FlipSocial", "Set a username first", "Settings > Username", TFT_RED);
     return false;
   }
   return true;
+}
+// WiFi + username — required to POST (new post, comment, message, friend, search).
+static bool fsReady() {
+  if (WiFi.status() != WL_CONNECTED) {
+    msgScreen("FlipSocial", "Connect WiFi first", "Settings > WiFi Setup", TFT_RED);
+    return false;
+  }
+  return fsUserSet();
 }
 
 // Modal yes/no confirmation (theme + font colours). Returns true on OK.
@@ -1516,7 +1599,8 @@ static void myPostsScreen() {
     int cnt = 0, n = fsLoadFeed(buf, series);
     for (int i = 0; i < n && cnt < FS_MAX; i++)
       if (buf[i].user == me) mine[cnt++] = buf[i];
-    FSVResult r = fsViewer(mine, cnt, String("My Posts  p") + series, FS_MYPOSTS, 0, series);
+    String title = String("My Posts  p") + series + (g_usingCache ? "  [offline]" : "");
+    FSVResult r = fsViewer(mine, cnt, title, FS_MYPOSTS, 0, series);
     if (r == FSV_BACK) return;
     if (r == FSV_NEXT) series++;
     else if (r == FSV_PREV && series > 1) series--;
@@ -1530,7 +1614,11 @@ static void profileInfoScreen(const String &who) {
   tft->drawString("Loading...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
   FSProfile p = fsLoadProfile(who);
   tft->fillRect(0, HDRH, SCRW, SCRH - HDRH, COL_BG);
-  if (!p.ok) { statusLine("Could not load profile.", TFT_RED); uint16_t x, y; waitTap(x, y); return; }
+  if (g_usingCache) drawHeader("Profile  [offline]", true);
+  if (!p.ok) {
+    statusLine(g_usingCache ? "Offline - no cached profile." : "Could not load profile.", TFT_RED);
+    uint16_t x, y; waitTap(x, y); return;
+  }
 
   int y = CONTENTY + 14;
   tft->setTextColor(COL_FG, COL_BG); tft->setTextDatum(TL_DATUM);
@@ -1558,8 +1646,8 @@ static void friendsScreen() {
     tft->drawString("Loading...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
     int n = fsLoadFriends(fr, 40);
     if (n == 0) {
-      static String empty[1]; empty[0] = "(no friends yet)";
-      if (scrollList("Friends", empty, 1, false) < 0) return;
+      static String empty[1]; empty[0] = g_usingCache ? "Offline - no cached friends" : "(no friends yet)";
+      if (scrollList(g_usingCache ? "Friends [offline]" : "Friends", empty, 1, false) < 0) return;
       continue;
     }
     int sel = scrollList("Friends", fr, n, true);
@@ -1579,7 +1667,7 @@ static void profileScreen() {
     int sel = scrollList(u.length() ? (String("@") + u) : String("Profile"), rows, 8, true);
     if (sel < 0) return;
     switch (sel) {
-      case 0: if (fsReady()) profileInfoScreen(fsUser()); break;
+      case 0: if (fsUserSet()) profileInfoScreen(fsUser()); break;   // View — offline ok
       case 1: if (fsReady()) {                                   // Edit Bio
                 FSProfile p = fsLoadProfile(fsUser());
                 char b[160] = {0}; strncpy(b, p.bio.c_str(), sizeof(b) - 1);
@@ -1588,7 +1676,7 @@ static void profileScreen() {
                   msgScreen("Bio", ok ? "Bio updated" : "Update failed", "", ok ? COL_OK : TFT_RED);
                 }
               } break;
-      case 2: if (fsReady()) friendsScreen(); break;
+      case 2: if (fsUserSet()) friendsScreen(); break;              // Friends — offline ok
       case 3: if (fsReady()) {                                   // Add Friend
                 char b[64] = {0};
                 if (touchKeyboardInput(*tft, COL_FG, COL_BG, b, sizeof(b), "Add friend (username):", false)
@@ -1597,7 +1685,7 @@ static void profileScreen() {
                   msgScreen("Add Friend", ok ? "Request sent" : "Failed", String(b), ok ? COL_OK : TFT_RED);
                 }
               } break;
-      case 4: if (fsReady()) myPostsScreen(); break;
+      case 4: if (fsUserSet()) myPostsScreen(); break;              // My Posts — offline ok
       case 5: { char b[64] = {0}; strncpy(b, u.c_str(), sizeof(b) - 1);
                 if (touchKeyboardInput(*tft, COL_FG, COL_BG, b, sizeof(b), "Username:", false))
                   credSet("user", String(b)); } break;
@@ -1692,12 +1780,12 @@ static void drawMenu() {
 
 static void openMenuItem(int i) {
   switch (i) {
-    case 0: if (fsReady()) feedScreen();     break;     // Feed
-    case 1: if (fsReady()) fsPost();         break;     // New Post
-    case 2: if (fsReady()) messagesScreen(); break;     // Messages
-    case 3: if (fsReady()) exploreScreen();  break;     // Explore
-    case 4: profileScreen();             break;
-    case 5: settingsFlow();              break;
+    case 0: if (fsUserSet()) feedScreen();     break;   // Feed — viewable offline (cache)
+    case 1: if (fsReady())   fsPost();         break;   // New Post — needs WiFi
+    case 2: if (fsUserSet()) messagesScreen(); break;   // Messages — viewable offline (cache)
+    case 3: if (fsReady())   exploreScreen();  break;   // Explore — needs a live search
+    case 4: profileScreen();               break;
+    case 5: settingsFlow();                break;
     default: break;
   }
   drawMenu();
@@ -1809,6 +1897,18 @@ void setup() {
 void loop() {
   vm->run();
   wifiBgTick();                        // advance the background WiFi connect
+
+  // Reconnect watchdog: if the link drops (or is still down), (re)start a
+  // background connect — immediately on the drop edge, then retry every 20 s.
+  static bool wasConnected = false;
+  static uint32_t lastReconnect = 0;
+  bool nowConnected = (WiFi.status() == WL_CONNECTED);
+  if (!nowConnected && (g_wb == WB_DONE || g_wb == WB_IDLE) &&
+      (wasConnected || millis() - lastReconnect > 20000)) {
+    lastReconnect = millis();
+    wifiBgBegin();                      // scans + reconnects to the closest saved network
+  }
+  wasConnected = nowConnected;
 
   // Activity LED mirrors the connecting state (on while scanning/associating).
   // Note: FlipSocial screens block loop() and drive the LED themselves via fsRequest.
