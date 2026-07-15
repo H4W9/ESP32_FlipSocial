@@ -11,6 +11,24 @@
 
 #define MARAUDER_PANCAKE
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Firmware identity — shown on the Settings → About screen.
+// Bump FW_VERSION when cutting a release. FW_COMMIT is stamped by CI at build
+// time (see .github/workflows/build.yml); it stays "dev" for local builds.
+// ─────────────────────────────────────────────────────────────────────────────
+#define FW_NAME    "FlipSocial"
+#define FW_AUTHOR  "H4W9"
+#define FW_VERSION "1.0.0"
+#ifndef FW_COMMIT
+#define FW_COMMIT  "dev"
+#endif
+
+// Board metadata (About screen).
+#define BOARD_NAME    "Pancake C5"
+#define BOARD_MCU     "ESP32-C5"
+#define BOARD_DISPLAY "ST7796 320x480"
+#define BOARD_TOUCH   "FT6336 capacitive"
+
 // Uncomment for verbose serial logging.
 // #define DEVELOPER
 

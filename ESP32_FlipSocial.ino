@@ -573,47 +573,44 @@ static void msgScreen(const char *title, const String &a, const String &b, uint1
 // (usually wrong password), 201 = no AP found (band/channel), 205 = conn fail.
 static volatile int g_wifiReason = 0;
 static volatile int g_wifiEvt = -1;   // last Arduino WiFi event id (-1 = none seen)
+static bool g_manualDisconnect = false;   // user tapped Disconnect — don't auto-reconnect
 static void wifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   g_wifiEvt = (int)event;
   if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED)
     g_wifiReason = info.wifi_sta_disconnected.reason;
 }
 
-// Wait up to timeoutMs for association, updating the on-screen status/reason.
-// Tapping the screen aborts the wait (returns false) so the user is never stuck.
-static bool waitConnect(uint32_t timeoutMs) {
-  uint32_t start = millis();
-  int last = -999;
+// Poll for association up to timeoutMs, animating a "connecting..." line at
+// `spinnerY`. Tapping the screen cancels (returns false).
+static bool waitConnect(uint32_t timeoutMs, int spinnerY) {
+  uint32_t start = millis(), lastAnim = 0;
   bool wasDown = touch->isPressed();
-  statusLine("Connecting...  tap to cancel");
+  int dots = 0;
   while (WiFi.status() != WL_CONNECTED && (millis() - start) < timeoutMs) {
     touch->run();
     bool down = touch->isPressed();
-    if (down && !wasDown) return false;    // user cancelled
+    if (down && !wasDown) return false;    // tap to cancel
     wasDown = down;
-    int s = WiFi.status();
-    if (s != last) {
-      last = s;
-      tft->fillRect(0, 78, SCRW, 20, COL_BG);
-      tft->setTextColor(COL_FG, COL_BG);
-      tft->drawString(String("st ") + s + "  ev " + g_wifiEvt + "  rsn " + g_wifiReason, 10, 78, 2);
+    if (millis() - lastAnim > 350) {
+      lastAnim = millis();
+      String d = "connecting";
+      for (int i = 0; i < (dots = (dots + 1) % 4); i++) d += ".";
+      tft->fillRect(0, spinnerY, SCRW, 20, COL_BG);
+      tft->setTextColor(COL_DIM, COL_BG); tft->setTextDatum(MC_DATUM);
+      tft->drawString(d, SCRW / 2, spinnerY + 8, 2);
+      tft->setTextDatum(TL_DATUM);
     }
-    delay(60);
+    delay(30);
   }
   return WiFi.status() == WL_CONNECTED;
 }
 
-// Blocking connect with on-screen progress. FlipperHTTP's ESP32-C5 approach:
-// WiFi.setBandMode(WIFI_BAND_MODE_AUTO) + a plain WiFi.begin() — no scan, BSSID
-// pinning, or radio OFF/STA cycle. The band-mode call is what lets the dual-band
-// C5 pick 2.4/5 GHz on its own, which is what the old workarounds were faking.
+// Blocking connect with a clean loading screen. FlipperHTTP's ESP32-C5 approach:
+// setBandMode(AUTO) + a plain WiFi.begin() — no scan / BSSID pin / radio cycle.
 static bool connectWiFi(const String &ssid, const String &pass) {
   g_wifiConnecting = true;
+  g_manualDisconnect = false;                // an explicit connect re-enables auto-reconnect
   ledWifi();
-  tft->fillScreen(COL_BG);
-  drawHeader("WiFi", false);
-  statusLine((String("Connecting to ") + ssid + " ...").c_str());
-
   g_wifiReason = 0;
   g_wifiEvt = -1;
   WiFi.persistent(false);
@@ -624,7 +621,16 @@ static bool connectWiFi(const String &ssid, const String &pass) {
   WiFi.begin(ssid.c_str(), pass.c_str());
   WiFi.setAutoReconnect(false);
 
-  bool ok = waitConnect(12000);
+  tft->fillScreen(COL_BG);
+  drawHeader("WiFi", true);
+  tft->setTextDatum(MC_DATUM);
+  tft->setTextColor(COL_DIM, COL_BG);
+  tft->drawString("Connecting to", SCRW / 2, SCRH / 2 - 22, 2);
+  tft->setTextColor(COL_FG, COL_BG);
+  tft->drawString(String("\"") + ssid + "\"", SCRW / 2, SCRH / 2 + 4, 4);
+  tft->setTextDatum(TL_DATUM);
+
+  bool ok = waitConnect(12000, SCRH / 2 + 34);
   g_wifiConnecting = false;
   ledOff();
   return ok;
@@ -695,8 +701,11 @@ static void wifiBgTick() {
   }
   if (g_wb == WB_CONNECT) {
     if (WiFi.status() == WL_CONNECTED) { g_wifiConnecting = false; g_wb = WB_DONE; return; }
-    if (millis() - g_wbT > 10000) {           // this network timed out — try the next
-      if (++g_wbIdx >= g_wbN) { g_wifiConnecting = false; g_wb = WB_DONE; return; }
+    // Try only the two closest saved networks (once each, 8 s), then give up and
+    // stay disconnected so the LED isn't lit the whole time we're offline.
+    int maxTry = g_wbN < 2 ? g_wbN : 2;
+    if (millis() - g_wbT > 8000) {
+      if (++g_wbIdx >= maxTry) { g_wifiConnecting = false; g_wb = WB_DONE; return; }
       wifiBgTry();
     }
   }
@@ -765,7 +774,8 @@ static void scanFlow() {
   }
 }
 
-// WiFi Setup: saved networks (tap to connect) with a [Back][Scan][Forget] footer.
+// WiFi Setup: saved networks (tap to connect) with a [Disconnect][Scan][Forget]
+// footer. The header chevron is Back; the footer left button disconnects WiFi.
 static void wifiSetup() {
   static String rows[WIFI_MAX_SAVED];
   for (;;) {
@@ -775,8 +785,9 @@ static void wifiSetup() {
       bool cur = (WiFi.status() == WL_CONNECTED && WiFi.SSID() == ss[i]);
       rows[i] = (cur ? String("* ") : String("")) + ss[i];
     }
-    int sel = scrollList("WiFi Setup", rows, n, true, "Back", "Scan", n > 0 ? "Forget" : "");
-    if (sel == SL_BACK || sel == SL_F0) return;            // header back or footer Back
+    int sel = scrollList("WiFi Setup", rows, n, true, "Disconnect", "Scan", n > 0 ? "Forget" : "");
+    if (sel == SL_BACK) return;                            // header back
+    if (sel == SL_F0) { WiFi.disconnect(true); g_manualDisconnect = true; continue; }   // Disconnect
     if (sel == SL_F1) { scanFlow(); continue; }            // Scan
     if (sel == SL_F2 && n > 0) {                           // Forget — pick a saved net
       static String frows[WIFI_MAX_SAVED];
@@ -803,17 +814,18 @@ static void wifiDebug() {
     line(String("Last event:   ") + g_wifiEvt);
     line(String("Disc reason:  ") + g_wifiReason);
     line(String("SSID:         ") + (up ? WiFi.SSID() : String("-")));
+    line(String("Channel:      ") + (up ? String(WiFi.channel()) : String("-")));
     line(String("IP:           ") + (up ? WiFi.localIP().toString() : String("-")));
     line(String("RSSI:         ") + (up ? String(WiFi.RSSI()) : String("-")));
     line(String("Free heap:    ") + ESP.getFreeHeap());
     line(String("Free PSRAM:   ") + ESP.getFreePsram());
-    drawNav("Back", "HTTP Test", "Reconnect");
+    drawNav("Disconnect", "HTTP Test", "Reconnect");
 
     uint16_t x, ty;
     if (!waitTap(x, ty)) continue;
-    if (backTapped(x, ty)) return;
+    if (backTapped(x, ty)) return;                 // header back
     int nh = navHit(x, ty);
-    if (nh == 0) return;
+    if (nh == 0) { WiFi.disconnect(true); g_manualDisconnect = true; continue; }   // Disconnect
     if (nh == 1) httpTest();
     if (nh == 2) {
       String ss[WIFI_MAX_SAVED], pp[WIFI_MAX_SAVED];
@@ -854,27 +866,46 @@ static void drawSettingRow(int row, int sel) {
   }
 }
 
-// About — app info + credits (JBlanked's FlipSocial, Picoware, H4W9 UI).
+// About — app name/version/author, hardware + build detail rows, credits.
 static void aboutScreen() {
   tft->fillScreen(COL_BG);
   drawHeader("About", true);
-  int y = CONTENTY + 18;
+  int cx = SCRW / 2, y = CONTENTY + 12;
+
+  // Name + version + author (centred, prominent).
+  tft->setTextColor(COL_FG, COL_BG);
   tft->setTextDatum(MC_DATUM);
-  tft->setTextColor(COL_FG, COL_BG);
-  tft->drawString("FlipSocial", SCRW / 2, y, 4); y += 34;
+  tft->drawString(FW_NAME, cx, y, 4); y += 32;
+  tft->drawString(String("Version ") + FW_VERSION, cx, y, 2); y += 22;
   tft->setTextColor(COL_DIM, COL_BG);
-  tft->drawString("Pancake ESP32-C5  ~  v1.0", SCRW / 2, y, 2); y += 34;
-  tft->setTextColor(COL_FG, COL_BG);
-  tft->drawString("Credits", SCRW / 2, y, 2); y += 26;
-  tft->setTextColor(COL_DIM, COL_BG);
-  tft->drawString("FlipSocial app & API", SCRW / 2, y, 2); y += 20;
-  tft->setTextColor(COL_FG, COL_BG);
-  tft->drawString("by JBlanked", SCRW / 2, y, 2); y += 20;
-  tft->setTextColor(COL_DIM, COL_BG);
-  tft->drawString("jblanked.com/flipper", SCRW / 2, y, 2); y += 28;
-  tft->drawString("Engine: Picoware", SCRW / 2, y, 2); y += 20;
-  tft->drawString("UI: H4W9", SCRW / 2, y, 2); y += 20;
+  tft->drawString("by " FW_AUTHOR, cx, y, 2); y += 24;
+  tft->drawFastHLine(16, y, SCRW - 32, theme.neon(1, theme.edge())); y += 10;
+
+  // Label : value detail rows.
   tft->setTextDatum(TL_DATUM);
+  auto row = [&](const char *label, const String &value) {
+    tft->setTextColor(COL_DIM, COL_BG); tft->drawString(label, 16, y, 2);
+    tft->setTextColor(COL_FG, COL_BG);  tft->drawString(value, 110, y, 2);
+    y += 21;
+  };
+  row("Board",   BOARD_NAME);
+  row("MCU",     BOARD_MCU);
+  row("Display", BOARD_DISPLAY);
+  row("Touch",   BOARD_TOUCH);
+#ifdef HAS_PSRAM
+  row("PSRAM",   "Yes");
+#else
+  row("PSRAM",   "None");
+#endif
+  row("Built",   __DATE__);
+  row("Commit",  FW_COMMIT);
+
+  y += 4;
+  tft->drawFastHLine(16, y, SCRW - 32, theme.neon(2, theme.edge())); y += 8;
+  tft->setTextColor(COL_DIM, COL_BG);
+  tft->drawString("FlipSocial app & API by JBlanked", 16, y, 2); y += 20;
+  tft->drawString("jblanked.com/flipper  -  Picoware", 16, y, 2);
+
   statusLine("Tap to go back.", COL_DIM);
   uint16_t x, ty; waitTap(x, ty);
 }
@@ -1046,7 +1077,17 @@ static int fsLoadComments(FSMsg *arr, uint32_t postId) {
   return n;
 }
 
+// Guard for actions that POST (need a live connection). Shows an offline message.
+static bool fsOnline() {
+  if (WiFi.status() != WL_CONNECTED) {
+    msgScreen("Offline", "Connect to WiFi first", "Settings > WiFi Setup", TFT_RED);
+    return false;
+  }
+  return true;
+}
+
 static void fsFlip(FSMsg &m) {
+  if (!fsOnline()) return;
   String payload = String("{\"username\":\"") + fsUser() + "\",\"post_id\":\"" + m.id + "\"}";
   fsRequest("POST", "https://www.jblanked.com/flipper/api/feed/flip/", payload);
   m.flipped = !m.flipped;
@@ -1110,6 +1151,7 @@ static bool fsAddFriend(const String &friendName) {
   return r.indexOf("SUCCESS") != -1 || r.indexOf("success") != -1;
 }
 static bool fsRemoveFriend(const String &friendName) {
+  if (!fsOnline()) return false;
   String payload = String("{\"username\":\"") + fsUser() + "\",\"friend\":\"" + friendName + "\"}";
   String r = fsRequest("POST", "https://www.jblanked.com/flipper/api/user/remove-friend/", payload);
   return r.indexOf("SUCCESS") != -1 || r.indexOf("success") != -1;
@@ -1149,6 +1191,7 @@ static int fsLoadMessages(FSMsg *arr, const String &peer) {
 }
 // POST /messages/{me}/post/  body {"receiver","content"}
 static bool fsSendMessage(const String &peer, const String &content) {
+  if (!fsOnline()) return false;
   String payload = String("{\"receiver\":\"") + peer + "\",\"content\":\"" + content + "\"}";
   String r = fsRequest("POST", "https://www.jblanked.com/flipper/api/messages/" + fsUser() + "/post/", payload);
   bool ok = fsOk(r);
@@ -1172,6 +1215,7 @@ static int fsExplore(const String &keyword, String *arr, int maxN) {
 
 // Returns true if a comment was successfully added.
 static bool fsAddComment(uint32_t postId) {
+  if (!fsOnline()) return false;
   char b[256] = {0};
   if (!touchKeyboardInput(*tft, COL_FG, COL_BG, b, sizeof(b), "Comment:", false)) return false;
   if (strlen(b) == 0) return false;
@@ -1184,6 +1228,7 @@ static bool fsAddComment(uint32_t postId) {
 }
 
 static void fsPost() {
+  if (!fsOnline()) return;
   char b[256] = {0};
   if (!touchKeyboardInput(*tft, COL_FG, COL_BG, b, sizeof(b), "New Post:", false)) return;
   if (strlen(b) == 0) return;
@@ -1898,14 +1943,12 @@ void loop() {
   vm->run();
   wifiBgTick();                        // advance the background WiFi connect
 
-  // Reconnect watchdog: if the link drops (or is still down), (re)start a
-  // background connect — immediately on the drop edge, then retry every 20 s.
+  // Reconnect watchdog: ONLY on the drop edge (connected -> lost), make one
+  // reconnect pass (the two closest saved nets). If it fails we stay disconnected
+  // rather than retrying forever — the LED goes off instead of pulsing amber.
   static bool wasConnected = false;
-  static uint32_t lastReconnect = 0;
   bool nowConnected = (WiFi.status() == WL_CONNECTED);
-  if (!nowConnected && (g_wb == WB_DONE || g_wb == WB_IDLE) &&
-      (wasConnected || millis() - lastReconnect > 20000)) {
-    lastReconnect = millis();
+  if (wasConnected && !nowConnected && !g_manualDisconnect && (g_wb == WB_DONE || g_wb == WB_IDLE)) {
     wifiBgBegin();                      // scans + reconnects to the closest saved network
   }
   wasConnected = nowConnected;
