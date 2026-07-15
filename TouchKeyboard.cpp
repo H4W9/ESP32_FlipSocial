@@ -85,9 +85,56 @@ static void passToggleRect(uint16_t scrW, const char* title,
     y = boxY + boxH + 4;
 }
 
+// ── Input-box / cursor helpers ────────────────────────────────────────────────
+// Rect of the framed input box (so taps in it can reposition the cursor).
+static void kbBoxRect(uint16_t scrW, const char* title,
+                      int16_t& x, int16_t& y, int16_t& w, int16_t& h) {
+    int16_t titleH = (title && title[0]) ? 22 : 0;
+    x = 4; y = 6 + titleH; w = (int16_t)scrW - 8; h = 26;
+}
+// Pixel width of the buffer bytes from index a up to b, as drawn (mask => '*'), font 2.
+static int16_t kbSubW(TFT_eSPI& tft, const char* buf, size_t a, size_t b, bool mask) {
+    if (b <= a) return 0;
+    char tmp[132]; size_t k = 0;
+    for (size_t i = a; i < b && k < sizeof(tmp) - 1; i++) tmp[k++] = mask ? '*' : buf[i];
+    tmp[k] = '\0';
+    return (int16_t)tft.textWidth(tmp, 2);
+}
+// Character index nearest a tap at `relx` (px from the text's left edge).
+static size_t kbIndexAt(TFT_eSPI& tft, const char* buf, size_t viewStart, int16_t relx, bool mask) {
+    size_t n = strlen(buf);
+    if (relx <= 0) return viewStart;
+    int16_t acc = 0;
+    for (size_t i = viewStart; i < n; i++) {
+        char c = mask ? '*' : buf[i]; char one[2] = { c, '\0' };
+        int16_t cw = (int16_t)tft.textWidth(one, 2);
+        if (relx < acc + cw / 2) return i;
+        acc += cw;
+    }
+    return n;
+}
+// Insert/delete at the cursor (not just the end).
+static bool kbInsert(char* buf, size_t bufLen, size_t& cursor, char c) {
+    size_t len = strlen(buf);
+    if (len + 1 >= bufLen) return false;
+    if (cursor > len) cursor = len;
+    memmove(buf + cursor + 1, buf + cursor, len - cursor + 1);   // shift incl. NUL
+    buf[cursor] = c;
+    cursor++;
+    return true;
+}
+static bool kbBackspace(char* buf, size_t& cursor) {
+    if (cursor == 0) return false;
+    size_t len = strlen(buf);
+    memmove(buf + cursor - 1, buf + cursor, len - cursor + 1);
+    cursor--;
+    return true;
+}
+
 static void drawTextArea(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
                          uint16_t scrW, uint16_t scrH,
                          const char* title, const char* buffer,
+                         size_t cursor, size_t& viewStart,
                          bool password, bool reveal) {
     int16_t areaH = kbY(scrH);
     tft.fillRect(0, 0, (int16_t)scrW, areaH, bg);
@@ -100,36 +147,37 @@ static void drawTextArea(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
     }
 
     // Framed input box
-    int16_t boxY = y;
-    int16_t boxH = 26;
+    int16_t boxY = y, boxH = 26;
     tft.drawRect(4, boxY, (int16_t)scrW - 8, boxH, fg);
 
-    tft.setTextColor(fg, bg);
-    tft.setTextDatum(TL_DATUM);
-    int16_t tx = 8;
-    int16_t ty = boxY + (boxH - 16) / 2;
     const char* p = buffer ? buffer : "";
     size_t n = strlen(p);
-    // Mask only when it's a password and the user hasn't tapped SHOW.
+    if (cursor > n) cursor = n;
     bool mask = password && !reveal;
-    char shown[64];
-    if (mask) {
-        size_t k = n < sizeof(shown) - 1 ? n : sizeof(shown) - 1;
-        memset(shown, '*', k);
-        shown[k] = '\0';
-    } else {
-        strncpy(shown, p, sizeof(shown) - 1);
-        shown[sizeof(shown) - 1] = '\0';
-    }
-    // Show the tail if the text overflows: trim from the left until it fits.
+    int16_t tx = 8, ty = boxY + (boxH - 16) / 2;
     int16_t maxW = (int16_t)scrW - 8 - 12;
-    char* s = shown;
-    while (tft.textWidth(s, 2) > maxW && *s) s++;
-    tft.drawString(s, tx, ty, 2);
-    // Cursor bar
-    int16_t cx = tx + tft.textWidth(s, 2);
-    if (cx > (int16_t)scrW - 8) cx = (int16_t)scrW - 8;
-    tft.fillRect(cx + 1, ty, 2, 16, fg);
+
+    // Horizontal scroll: keep the cursor inside the visible window.
+    if (cursor < viewStart) viewStart = cursor;
+    while (viewStart < cursor && kbSubW(tft, p, viewStart, cursor, mask) > maxW) viewStart++;
+
+    // Visible substring from viewStart, clipped to the box width.
+    char vis[132]; size_t k = 0; int16_t w = 0;
+    for (size_t i = viewStart; i < n && k < sizeof(vis) - 1; i++) {
+        char c = mask ? '*' : p[i]; char one[2] = { c, '\0' };
+        int16_t cw = (int16_t)tft.textWidth(one, 2);
+        if (w + cw > maxW) break;
+        vis[k++] = c; w += cw;
+    }
+    vis[k] = '\0';
+    tft.setTextColor(fg, bg);
+    tft.setTextDatum(TL_DATUM);
+    tft.drawString(vis, tx, ty, 2);
+
+    // Caret at the cursor position.
+    int16_t caretX = tx + kbSubW(tft, p, viewStart, cursor, mask);
+    if (caretX > (int16_t)scrW - 8) caretX = (int16_t)scrW - 8;
+    tft.fillRect(caretX, ty, 2, 16, fg);
 
     // SHOW / HIDE toggle for password fields.
     if (password) {
@@ -244,14 +292,6 @@ static void drawKeyboard(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
     tft.drawCentreString("OK", 9 * cW + cW / 2, ctrlY, 2);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Buffer helpers
-// ─────────────────────────────────────────────────────────────────────────────
-static bool appendByte(char* buf, size_t bufLen, char c) {
-    size_t len = strlen(buf);
-    if (len + 1 < bufLen) { buf[len] = c; buf[len + 1] = '\0'; return true; }
-    return false;
-}
 
 // Unified hit-test: which key is under (tx,ty), its on-screen rect, and (for a
 // character key) the resulting char given `upper`. Geometry matches drawKeyboard.
@@ -370,14 +410,17 @@ bool touchKeyboardInput(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
     bool     capsLock = false;   // all-caps (hold CAPS)
     bool     shiftOnce = false;  // uppercase next letter only (tap CAPS)
     bool     reveal   = false;
+    size_t   cursor    = strlen(buffer);   // insertion point within the text
+    size_t   viewStart = 0;                // first visible char (horizontal scroll)
 
     auto upperNow = [&]() { return capsLock || shiftOnce; };
     auto capsMode = [&]() { return capsLock ? 2 : (shiftOnce ? 1 : 0); };
+    auto redrawText = [&]() { drawTextArea(tft, fg, bg, scrW, scrH, title, buffer, cursor, viewStart, password, reveal); };
 
     const uint32_t CAPS_HOLD_MS = 450;   // hold CAPS this long → caps-lock
     const uint32_t MIN_FLASH_MS = 55;    // keep the press highlight visible at least this long
 
-    drawTextArea(tft, fg, bg, scrW, scrH, title, buffer, password, reveal);
+    redrawText();
     drawKeyboard(tft, fg, bg, scrW, scrH, layout, upperNow(), capsMode());
 
     for (;;) {
@@ -392,7 +435,19 @@ bool touchKeyboardInput(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
                 (int16_t)ty >= by && (int16_t)ty < by + bh) {
                 uint16_t rx, ry; while (kb_rawTouch(tft, &rx, &ry)) { delay(8); yield(); }
                 reveal = !reveal;
-                drawTextArea(tft, fg, bg, scrW, scrH, title, buffer, password, reveal);
+                redrawText();
+                continue;
+            }
+        }
+
+        // Tap inside the input box → move the cursor to that character.
+        {
+            int16_t bx, by, bw, bh; kbBoxRect(scrW, title, bx, by, bw, bh);
+            if ((int16_t)tx >= bx && (int16_t)tx < bx + bw &&
+                (int16_t)ty >= by && (int16_t)ty < by + bh) {
+                cursor = kbIndexAt(tft, buffer, viewStart, (int16_t)tx - 8, password && !reveal);
+                uint16_t rx, ry; while (kb_rawTouch(tft, &rx, &ry)) { delay(8); yield(); }
+                redrawText();
                 continue;
             }
         }
@@ -420,9 +475,9 @@ bool touchKeyboardInput(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
         switch (h.kind) {
             case KK_CHAR: {
                 bool oneShot = shiftOnce && !capsLock;      // this letter reverts the case
-                if (appendByte(buffer, bufLen, h.ch)) {
+                if (kbInsert(buffer, bufLen, cursor, h.ch)) {
                     if (oneShot) shiftOnce = false;
-                    drawTextArea(tft, fg, bg, scrW, scrH, title, buffer, password, reveal);
+                    redrawText();
                 }
                 // Only the pressed key changed, UNLESS a one-shot shift just reverted
                 // every letter's case → then a full redraw is unavoidable.
@@ -431,17 +486,13 @@ bool touchKeyboardInput(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
                 break;
             }
             case KK_SPACE:
-                if (appendByte(buffer, bufLen, ' '))
-                    drawTextArea(tft, fg, bg, scrW, scrH, title, buffer, password, reveal);
+                if (kbInsert(buffer, bufLen, cursor, ' ')) redrawText();
                 drawOneKey(tft, h, fg, bg);
                 break;
-            case KK_BKSP: {
-                size_t len = strlen(buffer);
-                if (len > 0) { buffer[len - 1] = '\0';
-                               drawTextArea(tft, fg, bg, scrW, scrH, title, buffer, password, reveal); }
+            case KK_BKSP:
+                if (kbBackspace(buffer, cursor)) redrawText();
                 drawOneKey(tft, h, fg, bg);
                 break;
-            }
             case KK_LAYOUT:                                 // whole board changes → full redraw
                 layout = (layout == KB_ALPHA) ? KB_SYMBOLS : KB_ALPHA;
                 drawKeyboard(tft, fg, bg, scrW, scrH, layout, upperNow(), capsMode());
