@@ -356,13 +356,33 @@ static void drawRowSprite(TFT_eSprite &spr, int y, const String &text, bool arro
   spr.setTextDatum(TL_DATUM);
 }
 
-// Momentum-scrolling list of string rows (no paging). Returns the tapped row
-// index, or -1 if the Back button was tapped.
-static int scrollList(const String &title, String *rows, int n, bool arrow) {
-  const int CY = CONTENTY, CH = SCRH - CONTENTY;
+// Bible-style scrollbar drawn into a sprite: track + thumb at the right edge.
+// `viewH` = visible height, `total` = content height, `scroll` = current offset.
+static void sprScrollBar(TFT_eSprite &spr, int viewH, int total, float scroll) {
+  if (total <= viewH) return;
+  const int bw = 4, bx = SCRW - bw - 1;
+  spr.fillRect(bx, 0, bw, viewH, theme.edge());
+  int thumbH = viewH * viewH / total; if (thumbH < 14) thumbH = 14;
+  int maxS = total - viewH;
+  int thumbY = (maxS > 0) ? (int)((scroll / (float)maxS) * (viewH - thumbH)) : 0;
+  spr.fillRect(bx, thumbY, bw, thumbH, COL_DIM);
+}
+
+// scrollList return sentinels for footer-button taps (Back is SL_BACK).
+static const int SL_BACK = -1, SL_F0 = -2, SL_F1 = -3, SL_F2 = -4;
+
+// Momentum-scrolling list of string rows with a right-edge scrollbar. Optional
+// footer nav bar (pass labels): a footer tap returns SL_F0/SL_F1/SL_F2, Back
+// returns SL_BACK, and a row tap returns its index.
+static int scrollList(const String &title, String *rows, int n, bool arrow,
+                      const char *fL = nullptr, const char *fM = nullptr, const char *fR = nullptr) {
+  bool hasFooter = (fL && fL[0]) || (fM && fM[0]) || (fR && fR[0]);
+  const int CY = CONTENTY;
+  const int CH = SCRH - CONTENTY - (hasFooter ? NAVH : 0);
   int total = n * ITEMH;
   tft->fillScreen(COL_BG);
   drawHeader(title, true);
+  if (hasFooter) drawNav(fL ? fL : "", fM ? fM : "", fR ? fR : "");
 
   TFT_eSprite spr(tft);
   spr.setColorDepth(16);
@@ -385,6 +405,7 @@ static int scrollList(const String &title, String *rows, int n, bool arrow) {
         if (y + ITEMH < 0 || y > CH) continue;
         drawRowSprite(spr, y, rows[i], arrow);
       }
+      sprScrollBar(spr, CH, total, scroll);
       spr.pushSprite(0, CY);
     } else {
       tft->fillRect(0, CY, SCRW, CH, COL_BG);
@@ -415,8 +436,13 @@ static int scrollList(const String &title, String *rows, int n, bool arrow) {
       need = true;
     } else if (!down && wasDown) {
       if (!moved) {
-        if (backTapped(pX, pY)) { if (haveSpr) spr.deleteSprite(); return -1; }
-        if ((int)pY >= CY) {
+        if (backTapped(pX, pY)) { if (haveSpr) spr.deleteSprite(); return SL_BACK; }
+        if (hasFooter && (int)pY >= SCRH - NAVH) {          // footer button
+          int nh = navHit(pX, pY);
+          if (haveSpr) spr.deleteSprite();
+          return nh == 0 ? SL_F0 : nh == 2 ? SL_F2 : SL_F1;
+        }
+        if ((int)pY >= CY && (int)pY < CY + CH) {
           int idx = ((int)pY - CY + (int)scroll) / ITEMH;
           if (idx >= 0 && idx < n) { if (haveSpr) spr.deleteSprite(); return idx; }
         }
@@ -503,19 +529,31 @@ static void drawInfoRow(int y, const String &label, const String &val, bool sel)
   }
 }
 
-// Simple centred two-line message screen with a Back header (blocks for a tap).
+// Centred message screen with a Back header: headline `a` + optional detail `b`
+// (word-wrapped so long failure reasons stay readable). Blocks for a tap.
 static void msgScreen(const char *title, const String &a, const String &b, uint16_t col) {
   tft->fillScreen(COL_BG);
   drawHeader(title, true);
   tft->setTextColor(col, COL_BG);
   tft->setTextDatum(MC_DATUM);
-  tft->drawString(a, SCRW / 2, SCRH / 2 - 12, 2);
+  tft->drawString(a, SCRW / 2, SCRH / 2 - 20, 2);
   if (b.length()) {
     tft->setTextColor(COL_DIM, COL_BG);
-    tft->drawString(b, SCRW / 2, SCRH / 2 + 14, 2);
+    // Greedy word-wrap to the screen width (no dependency on fsWrap).
+    int y = SCRH / 2 + 6, maxW = SCRW - 24;
+    String line = "", rest = b;
+    while (rest.length() && y < SCRH - 20) {
+      int sp = rest.indexOf(' ');
+      String word = (sp < 0) ? rest : rest.substring(0, sp);
+      String cand = line.length() ? line + " " + word : word;
+      if (tft->textWidth(cand.c_str(), 2) <= maxW) { line = cand; }
+      else { tft->drawString(line, SCRW / 2, y, 2); y += 20; line = word; }
+      rest = (sp < 0) ? "" : rest.substring(sp + 1);
+    }
+    if (line.length() && y < SCRH - 20) tft->drawString(line, SCRW / 2, y, 2);
   }
   tft->setTextDatum(TL_DATUM);
-  uint16_t x, y; waitTap(x, y);
+  uint16_t x, y2; waitTap(x, y2);
 }
 
 // ── WiFi ──────────────────────────────────────────────────────────────────────
@@ -767,32 +805,27 @@ static void scanFlow() {
   }
 }
 
-// WiFi Setup: smooth-scroll list of saved networks (tap to connect), a Scan row,
-// and a Forget row. No paging.
+// WiFi Setup: saved networks (tap to connect) with a [Back][Scan][Forget] footer.
 static void wifiSetup() {
-  static String rows[WIFI_MAX_SAVED + 2];
+  static String rows[WIFI_MAX_SAVED];
   for (;;) {
     String ss[WIFI_MAX_SAVED], pp[WIFI_MAX_SAVED];
     int n = wifiLoad(ss, pp, WIFI_MAX_SAVED);
-    int r = 0;
     for (int i = 0; i < n; i++) {
       bool cur = (WiFi.status() == WL_CONNECTED && WiFi.SSID() == ss[i]);
-      rows[r++] = (cur ? String("* ") : String("")) + ss[i];
+      rows[i] = (cur ? String("* ") : String("")) + ss[i];
     }
-    int scanRow   = r; rows[r++] = "+ Scan for networks";
-    int forgetRow = (n > 0) ? r : -1;
-    if (n > 0) rows[r++] = "- Forget a network";
-
-    int sel = scrollList("WiFi Setup", rows, r, true);
-    if (sel < 0) return;
-    if (sel < n)              connectSaved(ss[sel]);
-    else if (sel == scanRow)  scanFlow();
-    else if (sel == forgetRow) {                       // pick a saved net to forget
+    int sel = scrollList("WiFi Setup", rows, n, true, "Back", "Scan", n > 0 ? "Forget" : "");
+    if (sel == SL_BACK || sel == SL_F0) return;            // header back or footer Back
+    if (sel == SL_F1) { scanFlow(); continue; }            // Scan
+    if (sel == SL_F2 && n > 0) {                           // Forget — pick a saved net
       static String frows[WIFI_MAX_SAVED];
       for (int i = 0; i < n; i++) frows[i] = ss[i];
       int f = scrollList("Forget", frows, n, true);
       if (f >= 0 && f < n) wifiForget(ss[f]);
+      continue;
     }
+    if (sel >= 0 && sel < n) connectSaved(ss[sel]);        // tap a saved network
   }
 }
 
@@ -831,7 +864,7 @@ static void wifiDebug() {
 }
 
 // ── Settings (ESP32_Bible layout: highlight on tap, partial redraw, no flash) ──
-static const int SET_N = 8;   // Theme, Accent, Font Color, Brightness, WiFi, Debug, User, Pass
+static const int SET_N = 9;   // + About (Theme, Accent, Font Color, Brightness, WiFi, Debug, User, Pass, About)
 // Value string for the two chip rows that need it for hit-testing.
 static String setChipVal(int row) {
   switch (row) {
@@ -855,8 +888,35 @@ static void drawSettingRow(int row, int sel) {
     case 5: drawInfoRow(y, "WiFi Debug", "", s); break;
     case 6: drawInfoRow(y, "Username",   credGet("user"), s); break;
     case 7: drawInfoRow(y, "Password",   credGet("pass").length() ? String("****") : String(""), s); break;
+    case 8: drawInfoRow(y, "About",      "", s); break;
   }
 }
+
+// About — app info + credits (JBlanked's FlipSocial, Picoware, ESP32 Bible UI).
+static void aboutScreen() {
+  tft->fillScreen(COL_BG);
+  drawHeader("About", true);
+  int y = CONTENTY + 18;
+  tft->setTextDatum(MC_DATUM);
+  tft->setTextColor(COL_FG, COL_BG);
+  tft->drawString("FlipSocial", SCRW / 2, y, 4); y += 34;
+  tft->setTextColor(COL_DIM, COL_BG);
+  tft->drawString("Pancake ESP32-C5  ~  v1.0", SCRW / 2, y, 2); y += 34;
+  tft->setTextColor(COL_FG, COL_BG);
+  tft->drawString("Credits", SCRW / 2, y, 2); y += 26;
+  tft->setTextColor(COL_DIM, COL_BG);
+  tft->drawString("FlipSocial app & API", SCRW / 2, y, 2); y += 20;
+  tft->setTextColor(COL_FG, COL_BG);
+  tft->drawString("by JBlanked", SCRW / 2, y, 2); y += 20;
+  tft->setTextColor(COL_DIM, COL_BG);
+  tft->drawString("jblanked.com/flipper", SCRW / 2, y, 2); y += 28;
+  tft->drawString("Engine: Picoware", SCRW / 2, y, 2); y += 20;
+  tft->drawString("UI: ESP32 Bible", SCRW / 2, y, 2); y += 20;
+  tft->setTextDatum(TL_DATUM);
+  statusLine("Tap to go back.", COL_DIM);
+  uint16_t x, ty; waitTap(x, ty);
+}
+
 static void settingsFlow() {
   int sel = -1;
   auto full = [&]() {                         // full repaint (theme/bg changed)
@@ -900,6 +960,7 @@ static void settingsFlow() {
                 if (touchKeyboardInput(*tft, COL_FG, COL_BG, b, sizeof(b), "FlipSocial Password:", true))
                   credSet("pass", String(b));
                 full(); } break;
+      case 8: aboutScreen(); full(); break;
       default: break;
     }
   }
@@ -924,9 +985,9 @@ static String fsRequest(const char *method, const String &url, const String &pay
   String p = credGet("pass");
   const char *hk[] = {"Content-Type", "HTTP_USER_AGENT", "HTTP_ACCEPT", "username", "password"};
   const char *hv[] = {"application/json", "Pico", "X-Flipper-Redirect", u.c_str(), p.c_str()};
-  if (vm) vm->getLED().on();                 // activity LED on during the fetch (as Picoware did)
+  ledHttp();                                 // blue while the HTTP request is in flight
   String r = http.request(method, url, payload, hk, hv, 5);
-  if (vm) vm->getLED().off();
+  ledOff();
   return r;
 }
 
@@ -986,6 +1047,24 @@ static void fsFlip(FSMsg &m) {
   m.flipped = !m.flipped;
   m.flips += m.flipped ? 1 : -1;
   if (m.flips < 0) m.flips = 0;
+}
+
+static int g_commentsAdded = 0;   // # comments added in the current comments view
+
+static bool fsOk(const String &r) { return r.indexOf("SUCCESS") != -1; }
+
+// Extract a short human-readable reason from a failed API response (like the app).
+static String fsReason(const String &resp) {
+  if (resp.length() == 0) return "No response from server";
+  JsonDocument d;
+  if (!deserializeJson(d, resp)) {
+    const char *keys[] = { "error", "message", "detail", "reason" };
+    for (const char *k : keys) { String s = d[k].as<String>(); if (s.length()) return s; }
+  }
+  String s = resp; s.trim();
+  if (s.startsWith("[")) { int e = s.indexOf(']'); if (e >= 0) { s = s.substring(e + 1); s.trim(); } }
+  if (s.length() > 96) s = s.substring(0, 96);
+  return s.length() ? s : String("Unknown error");
 }
 
 // ── Profile / friends API (jblanked user endpoints) ───────────────────────────
@@ -1066,7 +1145,10 @@ static int fsLoadMessages(FSMsg *arr, const String &peer) {
 static bool fsSendMessage(const String &peer, const String &content) {
   String payload = String("{\"receiver\":\"") + peer + "\",\"content\":\"" + content + "\"}";
   String r = fsRequest("POST", "https://www.jblanked.com/flipper/api/messages/" + fsUser() + "/post/", payload);
-  return r.indexOf("ERROR") == -1 && r.length() > 0;
+  bool ok = fsOk(r);
+  if (!ok) { ledErr(); msgScreen("Message", "Failed", fsReason(r), TFT_RED); } else ledOk();
+  ledOff();
+  return ok;
 }
 
 // GET /user/explore/{keyword}/{max}/ -> {"users":[username, ...]}
@@ -1082,12 +1164,17 @@ static int fsExplore(const String &keyword, String *arr, int maxN) {
   return n;
 }
 
-static void fsAddComment(uint32_t postId) {
+// Returns true if a comment was successfully added.
+static bool fsAddComment(uint32_t postId) {
   char b[256] = {0};
-  if (!touchKeyboardInput(*tft, COL_FG, COL_BG, b, sizeof(b), "Comment:", false)) return;
-  if (strlen(b) == 0) return;
+  if (!touchKeyboardInput(*tft, COL_FG, COL_BG, b, sizeof(b), "Comment:", false)) return false;
+  if (strlen(b) == 0) return false;
   String payload = String("{\"username\":\"") + fsUser() + "\",\"content\":\"" + b + "\",\"post_id\":\"" + postId + "\"}";
-  fsRequest("POST", "https://www.jblanked.com/flipper/api/feed/comment/", payload);
+  String r = fsRequest("POST", "https://www.jblanked.com/flipper/api/feed/comment/", payload);
+  bool ok = fsOk(r);
+  if (!ok) { ledErr(); msgScreen("Comment", "Failed", fsReason(r), TFT_RED); } else ledOk();
+  ledOff();
+  return ok;
 }
 
 static void fsPost() {
@@ -1097,9 +1184,10 @@ static void fsPost() {
   tft->fillScreen(COL_BG); drawHeader("New Post", true); statusLine("Posting...");
   String payload = String("{\"username\":\"") + fsUser() + "\",\"content\":\"" + b + "\"}";
   String r = fsRequest("POST", "https://www.jblanked.com/flipper/api/feed/post/", payload);
-  bool bad = (r.indexOf("ERROR") != -1 || r.length() == 0);
-  statusLine(bad ? "Post failed. Tap." : "Posted! Tap.", bad ? TFT_RED : COL_OK);
-  uint16_t x, y; waitTap(x, y);
+  bool ok = fsOk(r);
+  if (ok) ledOk(); else ledErr();
+  msgScreen("New Post", ok ? "Posted!" : "Failed", ok ? String("") : fsReason(r), ok ? COL_OK : TFT_RED);
+  ledOff();
 }
 
 // Word-wrap `s` to `maxW` pixels (font 2). If `out` is non-null, fills lines;
@@ -1135,6 +1223,14 @@ static int fsWrap(const String &s, int maxW, String *out, int maxLines) {
   return count;
 }
 
+// Black or white, whichever is legible on the given RGB565 background.
+static uint16_t contrastText(uint16_t c) {
+  int r = ((c >> 11) & 0x1F) * 255 / 31;
+  int g = ((c >> 5) & 0x3F) * 255 / 63;
+  int b = (c & 0x1F) * 255 / 31;
+  return ((r * 299 + g * 587 + b * 114) / 1000) > 140 ? 0x0000 : 0xFFFF;
+}
+
 static int fsBubbleH(const FSMsg &m, int mode) {
   int nl = fsWrap(m.msg, SCRW - 2 * FS_BM - 2 * FS_BP, nullptr, 0);
   if (nl < 1) nl = 1;
@@ -1154,14 +1250,15 @@ static void fsDrawBubble(TFT_eSprite &g, const FSMsg &m, int yTop, int idx, int 
   if (mode == FS_MESSAGES) {
     bool own = (m.user == fsUser());
     uint16_t fill = own ? COL_SEL : COL_ACCENT;
+    uint16_t body = own ? contrastText(fill) : COL_FG;   // legible on the own-message fill
     g.fillRoundRect(bx, yTop, bw, bh, 8, fill);
-    g.drawRoundRect(bx, yTop, bw, bh, 8, theme.neon(idx * 2, COL_DIM));
+    g.drawRoundRect(bx, yTop, bw, bh, 8, theme.neon(idx * 2, own ? COL_SEL : COL_DIM));
     int tx = bx + FS_BP, ty = yTop + FS_BP;
     g.setTextDatum(TL_DATUM);
-    g.setTextColor(COL_DIM, fill);
+    g.setTextColor(body, fill);
     g.drawString(own ? String("You") : m.user, tx, ty, 2);
     ty += FS_LH;
-    g.setTextColor(COL_FG, fill);
+    g.setTextColor(body, fill);
     for (int i = 0; i < nl; i++) { g.drawString(lines[i], tx, ty, 2); ty += FS_LH; }
     return;
   }
@@ -1183,17 +1280,17 @@ static void fsDrawBubble(TFT_eSprite &g, const FSMsg &m, int yTop, int idx, int 
   for (int i = 0; i < nl; i++) { g.drawString(lines[i], tx, ty, 2); ty += FS_LH; }
   ty += 6;
   g.setTextColor(COL_FG, fill);
-  g.drawString((m.flipped ? String("* ") : String("")) + m.flips + " flips", tx, ty, 2);
+  g.drawString((m.flipped ? String("* ") : String("")) + m.flips + (m.flips == 1 ? " Flip" : " Flips"), tx, ty, 2);
   if (showComments) {
     g.setTextDatum(TR_DATUM);
-    g.drawString(String(m.comments) + " comments", bx + bw - FS_BP, ty, 2);
+    g.drawString(String(m.comments) + (m.comments == 1 ? " Comment" : " Comments"), bx + bw - FS_BP, ty, 2);
     g.setTextDatum(TL_DATUM);
   }
 }
 
 // forward decls (mutually recursive: feed action popup opens the comments viewer)
 static FSVResult fsViewer(FSMsg *arr, int n, const String &title, int mode, uint32_t ctxPost, int series);
-static void fsCommentsScreen(uint32_t postId);
+static int fsCommentsScreen(uint32_t postId);   // returns # comments added
 
 static void fsActionPopup(FSMsg &m) {
   int bw = 264, bh = 252, bx = (SCRW - bw) / 2, by = (SCRH - bh) / 2;
@@ -1221,8 +1318,8 @@ static void fsActionPopup(FSMsg &m) {
     int i = ((int)ty - byy) / (bhh + gap);
     if (i < 0 || i > 3 || (((int)ty - byy) % (bhh + gap)) > bhh) continue;
     if (i == 0) { fsFlip(m); return; }
-    if (i == 1) { fsCommentsScreen(m.id); return; }
-    if (i == 2) { fsAddComment(m.id); m.comments++; return; }
+    if (i == 1) { m.comments += fsCommentsScreen(m.id); return; }   // reflect new comments on the post
+    if (i == 2) { if (fsAddComment(m.id)) m.comments++; return; }
     return;
   }
 }
@@ -1253,7 +1350,7 @@ static FSVResult fsViewer(FSMsg *arr, int n, const String &title, int mode, uint
   auto footer = [&]() {
     if (mode == FS_FEED)          drawNav("< Prev", "+ New Post", "Next >");
     else if (mode == FS_COMMENTS) drawNav("", "+ Add Comment", "");
-    else if (mode == FS_MESSAGES) drawNav("", "+ Send Message", "");
+    else if (mode == FS_MESSAGES) drawNav("< Prev", "+ Send", "Next >");
     else                          drawNav("", "", "");   // My Posts: read-only
   };
 
@@ -1276,6 +1373,7 @@ static FSVResult fsViewer(FSMsg *arr, int n, const String &title, int mode, uint
     if (n == 0) { spr.setTextColor(COL_DIM, COL_BG); spr.setTextDatum(TL_DATUM);
                   spr.drawString(mode == FS_COMMENTS ? "No comments yet."
                                : mode == FS_MESSAGES ? "No messages yet." : "No posts.", 12, 10, 2); }
+    sprScrollBar(spr, SPR_H, total, scroll);
     spr.pushSprite(0, HDRH);
   };
 
@@ -1309,9 +1407,12 @@ static FSVResult fsViewer(FSMsg *arr, int n, const String &title, int mode, uint
             if (nh == 1) { fsPost(); n = fsLoadFeed(arr, series); relayout(); scroll = 0;
                            tft->fillScreen(COL_BG); drawHeader(title, true); footer(); }
           } else if (mode == FS_COMMENTS) {
-            if (nh == 1) { fsAddComment(ctxPost); n = fsLoadComments(arr, ctxPost); relayout(); scroll = 0;
+            if (nh == 1) { if (fsAddComment(ctxPost)) g_commentsAdded++;
+                           n = fsLoadComments(arr, ctxPost); relayout(); scroll = 0;
                            tft->fillScreen(COL_BG); drawHeader(title, true); footer(); }
           } else if (mode == FS_MESSAGES) {
+            if (nh == 0) { spr.deleteSprite(); return FSV_PREV; }   // previous conversation
+            if (nh == 2) { spr.deleteSprite(); return FSV_NEXT; }   // next conversation
             if (nh == 1) {                                 // Send Message
               char b[256] = {0};
               if (touchKeyboardInput(*tft, COL_FG, COL_BG, b, sizeof(b), "Message:", false) && strlen(b))
@@ -1349,13 +1450,15 @@ static FSVResult fsViewer(FSMsg *arr, int n, const String &title, int mode, uint
   }
 }
 
-static void fsCommentsScreen(uint32_t postId) {
+static int fsCommentsScreen(uint32_t postId) {
   static FSMsg cm[FS_MAX];
+  g_commentsAdded = 0;
   tft->fillScreen(COL_BG); drawHeader("Comments", true);
   tft->setTextColor(COL_DIM, COL_BG); tft->setTextDatum(MC_DATUM);
   tft->drawString("Loading...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
   int k = fsLoadComments(cm, postId);
   fsViewer(cm, k, "Comments", FS_COMMENTS, postId, 0);
+  return g_commentsAdded;
 }
 
 static void feedScreen() {
@@ -1373,18 +1476,20 @@ static void feedScreen() {
   }
 }
 
-// A single DM thread with `peer` — chat bubbles + "+ Send Message" footer.
-static void messagesThreadScreen(const String &peer) {
+// A single DM thread with `peer` — chat bubbles + [< Prev][+ Send][Next >] footer.
+// Returns the viewer result so the caller can page between conversations.
+static FSVResult messagesThreadScreen(const String &peer) {
   static FSMsg msgs[FS_MAX];
   g_msgPeer = peer;
   tft->fillScreen(COL_BG); drawHeader(String("@") + peer, true);
   tft->setTextColor(COL_DIM, COL_BG); tft->setTextDatum(MC_DATUM);
   tft->drawString("Loading...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
   int n = fsLoadMessages(msgs, peer);
-  fsViewer(msgs, n, String("@") + peer, FS_MESSAGES, 0, 0);
+  return fsViewer(msgs, n, String("@") + peer, FS_MESSAGES, 0, 0);
 }
 
-// Messages — conversation list (+ "New Message"). Tap a user to open the thread.
+// Messages — conversation list (+ "New Message"). Tap a user to open the thread;
+// Prev/Next in the thread page through the conversation list.
 static void messagesScreen() {
   static String users[40];
   static String rows[41];
@@ -1400,11 +1505,18 @@ static void messagesScreen() {
     if (sel < 0) return;
     if (sel == 0) {                                    // start a new conversation
       char b[64] = {0};
-      if (touchKeyboardInput(*tft, COL_FG, COL_BG, b, sizeof(b), "Message to (username):", false) && strlen(b))
-        messagesThreadScreen(String(b));
-    } else {
-      int idx = sel - 1;
-      if (idx >= 0 && idx < n) messagesThreadScreen(users[idx]);
+      if (touchKeyboardInput(*tft, COL_FG, COL_BG, b, sizeof(b), "Message to (username):", false) && strlen(b)) {
+        FSVResult rr;
+        do { rr = messagesThreadScreen(String(b)); } while (rr != FSV_BACK);   // no list to page
+      }
+    } else if (n > 0) {
+      int cur = sel - 1;
+      for (;;) {
+        FSVResult rr = messagesThreadScreen(users[cur]);
+        if (rr == FSV_BACK) break;
+        if (rr == FSV_NEXT) cur = (cur + 1) % n;
+        else if (rr == FSV_PREV) cur = (cur + n - 1) % n;
+      }
     }
   }
 }
@@ -1570,7 +1682,8 @@ static void exploreUserScreen(const String &who) {
       bool ok = fsAddFriend(who);
       msgScreen("Add Friend", ok ? "Request sent" : "Failed", who, ok ? COL_OK : TFT_RED);
     } else if (sel == 2) {
-      messagesThreadScreen(who);
+      FSVResult rr;
+      do { rr = messagesThreadScreen(who); } while (rr != FSV_BACK);   // no list to page here
     }
   }
 }
