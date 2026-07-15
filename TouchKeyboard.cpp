@@ -35,7 +35,6 @@ static const char ROW3_SYM[] = ",./?";         // centered
 //  0 = CANCEL   1 = SYM/ABC   2..7 = SPACE (6 cols)   8 = BKSP   9 = OK
 
 enum KbLayout { KB_ALPHA = 0, KB_SYMBOLS };
-enum KbResult { KBR_NONE, KBR_CHANGED, KBR_DONE, KBR_CANCEL, KBR_LAYOUT, KBR_CAPS };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Geometry helpers — keyboard occupies the bottom half of the screen.
@@ -146,9 +145,10 @@ static void drawTextArea(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
     }
 }
 
+// upper = render letters uppercase; capsMode = CAPS key look (0 off, 1 shift-once, 2 lock).
 static void drawKeyboard(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
                          uint16_t scrW, uint16_t scrH,
-                         KbLayout layout, bool caps) {
+                         KbLayout layout, bool upper, int capsMode) {
     int16_t kY = kbY(scrH);
     int16_t kH = kbH(scrH);
     int16_t cW = cellW(scrW);
@@ -178,7 +178,7 @@ static void drawKeyboard(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
             int16_t kx = (int16_t)i * cW + xOff;
             tft.drawRect(kx, rowY, cW, cH, bdr);
             char c = row[i];
-            if (layout == KB_ALPHA && r >= 1 && c >= 'a' && c <= 'z' && caps)
+            if (layout == KB_ALPHA && r >= 1 && c >= 'a' && c <= 'z' && upper)
                 c = (char)(c - 'a' + 'A');
             int16_t tcy = rowY + (cH - 16) / 2;
             tft.setTextColor(key_fg, key_bg);
@@ -186,16 +186,19 @@ static void drawKeyboard(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
             tft.drawCentreString(c_str, kx + cW / 2, tcy, 2);
         }
 
-        // CAPS key: cols 8-9 in alpha row 3
+        // CAPS key: cols 8-9 in alpha row 3.
+        //   off (0) = grey "CAPS", shift-once (1) = yellow "Caps", lock (2) = green "CAPS".
         if (layout == KB_ALPHA && r == 3) {
             int16_t cx  = 8 * cW;
             int16_t cw2 = 2 * cW;
-            uint16_t caps_bg = caps ? (uint16_t)0x07E0 : key_bg;
-            uint16_t caps_fg = caps ? (uint16_t)TFT_BLACK : key_fg;
+            uint16_t caps_bg = (capsMode == 2) ? (uint16_t)0x07E0
+                             : (capsMode == 1) ? (uint16_t)0xFFE0 : key_bg;
+            uint16_t caps_fg = (capsMode == 0) ? key_fg : (uint16_t)TFT_BLACK;
+            const char* caps_lbl = (capsMode == 1) ? "Caps" : "CAPS";
             tft.fillRect(cx, rowY, cw2, cH, caps_bg);
             tft.drawRect(cx, rowY, cw2, cH, bdr);
             tft.setTextColor(caps_fg, caps_bg);
-            tft.drawCentreString(caps ? "caps" : "CAPS", cx + cW, rowY + (cH - 16) / 2, 2);
+            tft.drawCentreString(caps_lbl, cx + cW, rowY + (cH - 16) / 2, 2);
         }
     }
 
@@ -250,18 +253,19 @@ static bool appendByte(char* buf, size_t bufLen, char c) {
     return false;
 }
 
-static KbResult handleKbTouch(uint16_t tx, uint16_t ty,
-                              uint16_t scrW, uint16_t scrH,
-                              char* buffer, size_t bufLen,
-                              KbLayout layout, bool caps) {
-    int16_t kY = kbY(scrH);
-    int16_t kH = kbH(scrH);
-    int16_t cW = cellW(scrW);
-    int16_t cH = cellH(scrH);
+// Unified hit-test: which key is under (tx,ty), its on-screen rect, and (for a
+// character key) the resulting char given `upper`. Geometry matches drawKeyboard.
+enum KeyKind { KK_NONE, KK_CHAR, KK_CAPS, KK_CANCEL, KK_LAYOUT, KK_SPACE, KK_BKSP, KK_OK };
+struct KeyHit { KeyKind kind; int16_t kx, ky, kw, kh; char ch; };
 
-    if ((int16_t)ty < kY || (int16_t)ty >= kY + kH) return KBR_NONE;
+static KeyHit kbHit(uint16_t tx, uint16_t ty, uint16_t scrW, uint16_t scrH,
+                    KbLayout layout, bool upper) {
+    KeyHit h; h.kind = KK_NONE; h.ch = 0; h.kx = h.ky = h.kw = h.kh = 0;
+    int16_t kY = kbY(scrH), kH = kbH(scrH), cW = cellW(scrW), cH = cellH(scrH);
+    if ((int16_t)ty < kY || (int16_t)ty >= kY + kH) return h;
     int row = ((int16_t)ty - kY) / cH;
-    if (row < 0 || row >= KB_ROWS) return KBR_NONE;
+    if (row < 0 || row >= KB_ROWS) return h;
+    int16_t rowY = kY + (int16_t)row * cH;
 
     const char* alphaRows[4] = { ROW0_ALPHA, ROW1_ALPHA, ROW2_ALPHA, ROW3_ALPHA };
     const char* symRows[4]   = { ROW0_SYM,   ROW1_SYM,   ROW2_SYM,   ROW3_SYM   };
@@ -270,39 +274,85 @@ static KbResult handleKbTouch(uint16_t tx, uint16_t ty,
     if (row <= 3) {
         const char* rowStr = rows[row];
         int rowLen = (int)strlen(rowStr);
-
         if (layout == KB_ALPHA && row == 3) {
-            if ((int16_t)tx >= 8 * cW) return KBR_CAPS;          // CAPS cols 8-9
+            if ((int16_t)tx >= 8 * cW) {                         // CAPS cols 8-9
+                h.kind = KK_CAPS; h.kx = 8 * cW; h.ky = rowY; h.kw = 2 * cW; h.kh = cH;
+                return h;
+            }
             int col = (int16_t)tx / cW;
-            if (col < 0 || col >= rowLen) return KBR_NONE;
+            if (col < 0 || col >= rowLen) return h;
             char c = rowStr[col];
-            if (c >= 'a' && c <= 'z' && caps) c = (char)(c - 'a' + 'A');
-            return appendByte(buffer, bufLen, c) ? KBR_CHANGED : KBR_NONE;
+            if (c >= 'a' && c <= 'z' && upper) c = (char)(c - 'a' + 'A');
+            h.kind = KK_CHAR; h.ch = c; h.kx = (int16_t)col * cW; h.ky = rowY; h.kw = cW; h.kh = cH;
+            return h;
         }
-
         int16_t xOff = (int16_t)((KB_COLS - rowLen) * cW / 2);
         int col = ((int16_t)tx - xOff) / cW;
-        if (col < 0 || col >= rowLen) return KBR_NONE;
+        if (col < 0 || col >= rowLen) return h;
         char c = rowStr[col];
-        if (layout == KB_ALPHA && row >= 1 && c >= 'a' && c <= 'z' && caps)
+        if (layout == KB_ALPHA && row >= 1 && c >= 'a' && c <= 'z' && upper)
             c = (char)(c - 'a' + 'A');
-        return appendByte(buffer, bufLen, c) ? KBR_CHANGED : KBR_NONE;
+        h.kind = KK_CHAR; h.ch = c; h.kx = (int16_t)col * cW + xOff; h.ky = rowY; h.kw = cW; h.kh = cH;
+        return h;
     }
 
     // Control row 4
     int col = (int16_t)tx / cW;
+    h.ky = rowY; h.kh = cH;
     switch (col) {
-        case 0: return KBR_CANCEL;
-        case 1: return KBR_LAYOUT;
+        case 0: h.kind = KK_CANCEL; h.kx = 0;       h.kw = cW;     break;
+        case 1: h.kind = KK_LAYOUT; h.kx = cW;      h.kw = cW;     break;
         case 2: case 3: case 4: case 5: case 6: case 7:
-            return appendByte(buffer, bufLen, ' ') ? KBR_CHANGED : KBR_NONE;
-        case 8: {
-            size_t len = strlen(buffer);
-            if (len > 0) { buffer[len - 1] = '\0'; return KBR_CHANGED; }
-            return KBR_NONE;
-        }
-        case 9: return KBR_DONE;
-        default: return KBR_NONE;
+                h.kind = KK_SPACE;  h.kx = 2 * cW;  h.kw = 6 * cW; break;
+        case 8: h.kind = KK_BKSP;   h.kx = 8 * cW;  h.kw = cW;     break;
+        case 9: h.kind = KK_OK;     h.kx = 9 * cW;  h.kw = cW;     break;
+        default: break;
+    }
+    return h;
+}
+
+// Restore ONE key to its normal look (used on release so only the pressed key
+// repaints — no full-keyboard flash). Only needed for keys whose neighbours don't
+// change: character, space, backspace. (Layout/CAPS changes redraw the whole board.)
+static void drawOneKey(TFT_eSPI& tft, const KeyHit& h, uint16_t fg, uint16_t bg) {
+    uint16_t key_bg = (bg == TFT_WHITE) ? (uint16_t)0xBDF7 : (uint16_t)0x1082;
+    uint16_t key_fg = fg;
+    uint16_t bdr    = (bg == TFT_WHITE) ? (uint16_t)0x8430 : (uint16_t)0x4208;
+    tft.fillRect(h.kx, h.ky, h.kw, h.kh, key_bg);
+    tft.drawRect(h.kx, h.ky, h.kw, h.kh, bdr);
+    int16_t cx = h.kx + h.kw / 2, ty = h.ky + (h.kh - 16) / 2;
+    tft.setTextColor(key_fg, key_bg);
+    if (h.kind == KK_CHAR) { char s[2] = { h.ch, '\0' }; tft.drawCentreString(s, cx, ty, 2); }
+    else if (h.kind == KK_SPACE) tft.drawCentreString("SPACE", cx, ty, 2);
+    else if (h.kind == KK_BKSP) {                       // backspace arrow glyph
+        int16_t ax = h.kx + h.kw / 2 - 5, ay = h.ky + h.kh / 2;
+        tft.fillRect(ax + 3, ay - 3, 1, 1, key_fg);
+        tft.fillRect(ax + 2, ay - 2, 2, 1, key_fg);
+        tft.fillRect(ax + 1, ay - 1, 3, 1, key_fg);
+        tft.fillRect(ax + 0, ay + 0, 4, 1, key_fg);
+        tft.fillRect(ax + 1, ay + 1, 3, 1, key_fg);
+        tft.fillRect(ax + 2, ay + 2, 2, 1, key_fg);
+        tft.fillRect(ax + 3, ay + 3, 1, 1, key_fg);
+        tft.fillRect(ax + 4, ay + 0, 6, 1, key_fg);
+    }
+}
+
+// Momentary press feedback: draw the key inverted (fg fill, bg text).
+static void kbFlashKey(TFT_eSPI& tft, const KeyHit& h, uint16_t fg, uint16_t bg) {
+    if (h.kind == KK_NONE) return;
+    tft.fillRect(h.kx, h.ky, h.kw, h.kh, fg);
+    int16_t cx = h.kx + h.kw / 2, ty = h.ky + (h.kh - 16) / 2;
+    tft.setTextColor(bg, fg);
+    char s[2] = { h.ch, '\0' };
+    switch (h.kind) {
+        case KK_CHAR:   tft.drawCentreString(s, cx, ty, 2); break;
+        case KK_SPACE:  tft.drawCentreString("SPACE", cx, ty, 2); break;
+        case KK_LAYOUT: tft.drawCentreString("SYM", cx, ty, 2); break;
+        case KK_CANCEL: tft.drawCentreString("X", cx, ty, 2); break;
+        case KK_OK:     tft.drawCentreString("OK", cx, ty, 2); break;
+        case KK_CAPS:   tft.drawCentreString("CAPS", cx, ty, 2); break;
+        case KK_BKSP:   tft.drawCentreString("<", cx, ty, 2); break;
+        default: break;
     }
 }
 
@@ -316,57 +366,96 @@ bool touchKeyboardInput(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
 
     uint16_t scrW = (uint16_t)tft.width();
     uint16_t scrH = (uint16_t)tft.height();
-    KbLayout layout = KB_ALPHA;
-    bool     caps   = false;
-    bool     reveal = false;
+    KbLayout layout   = KB_ALPHA;
+    bool     capsLock = false;   // all-caps (hold CAPS)
+    bool     shiftOnce = false;  // uppercase next letter only (tap CAPS)
+    bool     reveal   = false;
+
+    auto upperNow = [&]() { return capsLock || shiftOnce; };
+    auto capsMode = [&]() { return capsLock ? 2 : (shiftOnce ? 1 : 0); };
+
+    const uint32_t CAPS_HOLD_MS = 450;   // hold CAPS this long → caps-lock
+    const uint32_t MIN_FLASH_MS = 55;    // keep the press highlight visible at least this long
 
     drawTextArea(tft, fg, bg, scrW, scrH, title, buffer, password, reveal);
-    drawKeyboard(tft, fg, bg, scrW, scrH, layout, caps);
-
-    uint32_t lastTouch = 0;
-    const uint32_t debounce = 150;
+    drawKeyboard(tft, fg, bg, scrW, scrH, layout, upperNow(), capsMode());
 
     for (;;) {
         uint16_t tx = 0, ty = 0;
-        if (kb_rawTouch(tft, &tx, &ty)) {
-            uint32_t now = millis();
-            if (now - lastTouch < debounce) { delay(5); continue; }
-            lastTouch = now;
+        if (!kb_rawTouch(tft, &tx, &ty)) { delay(5); yield(); continue; }
 
-            // SHOW / HIDE toggle (password fields) — handled before the keys.
-            if (password) {
-                int16_t bx, by, bw, bh;
-                passToggleRect(scrW, title, bx, by, bw, bh);
-                if ((int16_t)tx >= bx && (int16_t)tx < bx + bw &&
-                    (int16_t)ty >= by && (int16_t)ty < by + bh) {
-                    reveal = !reveal;
-                    drawTextArea(tft, fg, bg, scrW, scrH, title, buffer, password, reveal);
-                    continue;
-                }
-            }
-
-            KbResult r = handleKbTouch(tx, ty, scrW, scrH, buffer, bufLen, layout, caps);
-            switch (r) {
-                case KBR_CHANGED:
-                    drawTextArea(tft, fg, bg, scrW, scrH, title, buffer, password, reveal);
-                    break;
-                case KBR_DONE:
-                    return true;
-                case KBR_CANCEL:
-                    return false;
-                case KBR_LAYOUT:
-                    layout = (layout == KB_ALPHA) ? KB_SYMBOLS : KB_ALPHA;
-                    drawKeyboard(tft, fg, bg, scrW, scrH, layout, caps);
-                    break;
-                case KBR_CAPS:
-                    caps = !caps;
-                    drawKeyboard(tft, fg, bg, scrW, scrH, layout, caps);
-                    break;
-                default: break;
+        // SHOW / HIDE toggle (password fields) — handled before the keys.
+        if (password) {
+            int16_t bx, by, bw, bh;
+            passToggleRect(scrW, title, bx, by, bw, bh);
+            if ((int16_t)tx >= bx && (int16_t)tx < bx + bw &&
+                (int16_t)ty >= by && (int16_t)ty < by + bh) {
+                uint16_t rx, ry; while (kb_rawTouch(tft, &rx, &ry)) { delay(8); yield(); }
+                reveal = !reveal;
+                drawTextArea(tft, fg, bg, scrW, scrH, title, buffer, password, reveal);
+                continue;
             }
         }
-        delay(5);
-        yield();
+
+        KeyHit h = kbHit(tx, ty, scrW, scrH, layout, upperNow());
+        if (h.kind == KK_NONE) {                       // tap outside any key — wait for release
+            uint16_t rx, ry; while (kb_rawTouch(tft, &rx, &ry)) { delay(8); yield(); }
+            continue;
+        }
+
+        // Momentary press highlight; wait for release (or a CAPS hold), min flash time.
+        kbFlashKey(tft, h, fg, bg);
+        uint32_t t0 = millis();
+        bool held = false;
+        for (;;) {
+            uint16_t rx, ry;
+            bool down = kb_rawTouch(tft, &rx, &ry);
+            uint32_t el = millis() - t0;
+            if (h.kind == KK_CAPS && down && el >= CAPS_HOLD_MS) { held = true; break; }
+            if (!down && el >= MIN_FLASH_MS) break;
+            delay(8); yield();
+        }
+        if (held) { uint16_t rx, ry; while (kb_rawTouch(tft, &rx, &ry)) { delay(8); yield(); } }
+
+        switch (h.kind) {
+            case KK_CHAR: {
+                bool oneShot = shiftOnce && !capsLock;      // this letter reverts the case
+                if (appendByte(buffer, bufLen, h.ch)) {
+                    if (oneShot) shiftOnce = false;
+                    drawTextArea(tft, fg, bg, scrW, scrH, title, buffer, password, reveal);
+                }
+                // Only the pressed key changed, UNLESS a one-shot shift just reverted
+                // every letter's case → then a full redraw is unavoidable.
+                if (oneShot) drawKeyboard(tft, fg, bg, scrW, scrH, layout, upperNow(), capsMode());
+                else         drawOneKey(tft, h, fg, bg);
+                break;
+            }
+            case KK_SPACE:
+                if (appendByte(buffer, bufLen, ' '))
+                    drawTextArea(tft, fg, bg, scrW, scrH, title, buffer, password, reveal);
+                drawOneKey(tft, h, fg, bg);
+                break;
+            case KK_BKSP: {
+                size_t len = strlen(buffer);
+                if (len > 0) { buffer[len - 1] = '\0';
+                               drawTextArea(tft, fg, bg, scrW, scrH, title, buffer, password, reveal); }
+                drawOneKey(tft, h, fg, bg);
+                break;
+            }
+            case KK_LAYOUT:                                 // whole board changes → full redraw
+                layout = (layout == KB_ALPHA) ? KB_SYMBOLS : KB_ALPHA;
+                drawKeyboard(tft, fg, bg, scrW, scrH, layout, upperNow(), capsMode());
+                break;
+            case KK_CAPS:                                   // case + CAPS key change → full redraw
+                if (held)          { capsLock = !capsLock; shiftOnce = false; }  // hold → lock
+                else if (capsLock) { capsLock = false; }                        // tap while locked → off
+                else               { shiftOnce = !shiftOnce; }                  // tap → one-shot shift
+                drawKeyboard(tft, fg, bg, scrW, scrH, layout, upperNow(), capsMode());
+                break;
+            case KK_CANCEL: return false;
+            case KK_OK:     return true;
+            default: break;
+        }
     }
 }
 

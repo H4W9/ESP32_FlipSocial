@@ -1352,6 +1352,9 @@ static FSVResult fsViewer(FSMsg *arr, int n, const String &title, int mode, uint
             fsActionPopup(arr[idx]);
             tft->fillScreen(COL_BG); drawHeader(title, true); footer();
             need = true;
+          } else if (idx >= 0 && mode == FS_COMMENTS) {   // tap a comment to flip/unflip it
+            fsFlip(arr[idx]);
+            need = true;
           }
         }
       } else {
