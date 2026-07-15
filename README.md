@@ -1,16 +1,26 @@
-# Pancake Picoware
+# ESP32 FlipSocial (Pancake)
 
-A standalone HTTP firmware for the **Pancake** board (ESP32-C5, ST7796 320×480,
-FT6336 capacitive touch) — a touch port of [Picoware](https://github.com/jblanked/Picoware)
-that natively runs **FlipSocial**.
+A standalone touch firmware that runs **FlipSocial** natively on the **Pancake**
+board (ESP32-C5, ST7796 320×480, FT6336 capacitive touch) — no Flipper Zero
+attached. It talks to the FlipSocial API directly over WiFi/HTTPS and is built on
+[Picoware](https://github.com/jblanked/Picoware)'s panel / touch / HTTP core.
 
-## Status — staged build
+## Features
 
-| Milestone | Scope | State |
-|-----------|-------|-------|
-| **M1** | Boot + hardware bring-up, touch main menu, WiFi scan/connect (touch keyboard), test HTTPS GET | **code complete — needs a compile pass on hardware** |
-| M2 | FlipSocial on the touch shell | not started |
-| M3 | FlipWorld with on-screen d-pad | not started |
+- **Feed** — smooth-scrolling chat-style bubbles; tap a post to Flip/Unflip, view
+  or add comments; Prev/Next paging.
+- **New Post** — compose and post from the touch keyboard.
+- **Messages** — direct-message conversations; open a thread, send, page Prev/Next.
+- **Explore** — search users, then view profile / add friend / message.
+- **Profile** — your bio, friends count and join date; edit bio, manage friends,
+  see your posts, change username/password, log out.
+- **Settings** — 20 named themes, per-theme accent + font colour (with a Neon
+  rainbow theme), screen brightness, RGB status-LED brightness, WiFi setup, and an
+  About screen.
+- **Touch keyboard** — QWERTY with tap-to-position cursor editing, shift-once vs.
+  caps-lock, and a live character counter.
+- **WiFi** — connects to saved networks in the background at boot; the header WiFi
+  icon and the RGB status LED show connection/activity state.
 
 ## Build (Arduino IDE)
 
@@ -21,51 +31,45 @@ that natively runs **FlipSocial**.
 | Partition Scheme | Custom → `partitions.csv` in this folder |
 | Flash Frequency | 80 MHz |
 
-### Required library
-Install the **patched `TFT_eSPI-ESP32-C5`** used by the Bible firmware
-(`../bible_firmware/libraries/TFT_eSPI-ESP32-C5`) into your Arduino `libraries`
-folder, and set `User_Setup_Select.h` to:
+### Libraries
 
-```cpp
-#include <User_Setup_marauder_pancake.h>
-```
+- **`TFT_eSPI-ESP32-C5`** (the ESP32-C5-patched fork) — install into your Arduino
+  `libraries` folder and set its `User_Setup_Select.h` to:
 
-Also required (all already common / installable via Library Manager):
-`ArduinoJson`, `ArduinoHttpClient`. The ESP32-C5 Arduino core provides the rest.
+  ```cpp
+  #include <User_Setup_marauder_pancake.h>
+  ```
+- **ArduinoJson** and **ArduinoHttpClient** — via Library Manager.
 
-An SD card is used for Picoware settings/state files (WiFi credentials are stored
-in NVS via `Preferences`). FAT32.
+The ESP32-C5 Arduino core provides WiFi, HTTPS, SPIFFS and SD.
 
-## What M1 does
+### Storage
 
-1. Brings up backlight (PWM), SD (shared FSPI), PSRAM, FT6336 touch, and the
-   ST7796 panel (through Picoware's `Draw`).
-2. Shows a touch main menu: **WiFi Setup**, FlipSocial (M2), FlipWorld (M3).
-3. WiFi Setup: scans, lists networks (tap to pick), enter password on the touch
-   keyboard, connects, saves credentials, then runs a test HTTPS GET through
-   Picoware's `HTTP` class and prints the response.
+- **SPIFFS** — UI settings (`/pico_ui.dat`), FlipSocial credentials
+  (`/pico_user.json`) and saved WiFi networks (`/pico_wifi.json`).
+- **SD (FAT32)** — used by the Picoware core for its own files.
+
+## First run
+
+1. Flash, then open **Settings → WiFi Setup → Scan**, pick your network and enter
+   the password. It's saved and auto-connects on later boots.
+2. In **Settings**, set your FlipSocial **Username** and **Password** (create an
+   account first at [jblanked.com](https://www.jblanked.com/) if you don't have one).
+3. Open **Feed** and you're in.
 
 ## Layout
 
 ```
-pancake_picoware.ino     M1 sketch: bring-up + touch shell + WiFi + HTTP test
-configs.h                Pancake pin/board config (mirrors the Bible firmware)
-ft6336.h                 FT6336 capacitive-touch driver (from the Bible firmware)
-TouchKeyboard.{h,cpp}    Self-contained touch QWERTY keyboard (modeled on ESP32_Bible)
-partitions.csv           8 MB layout (nvs + ota_0 app + fat/spiffs)
-src/Picoware/            Vendored Picoware core, ported to ESP32-C5:
-  internal/boards.hpp        + BOARD_TYPE_PANCAKE / PancakeConfig
-  internal/gui/draw.*        PicoDVI guarded out; TFT_eSPI backend; getTFT() accessor
-  internal/system/input.*    Pico peripherals removed; FT6336 TouchInput added
-  internal/system/input_manager.hpp   Pancake touch branch + getTouch()
-  internal/system/storage.hpp         SD-backed (was Pico LittleFS)
-  internal/system/system.hpp          ESP.* heap/reboot (was rp2040.*)
-  internal/system/http.hpp            setInsecure() so HTTPS works
-  internal/system/{wifi_utils,wifi_ap,keyboard,view_manager,...}  (ESP32-native as-is)
+ESP32_FlipSocial.ino   Main sketch: UI shell + all FlipSocial features
+configs.h              Pancake pin / board config
+theme.h                Themes, accents, font colours, brightness (SPIFFS)
+ft6336.h               FT6336 capacitive-touch driver
+TouchKeyboard.{h,cpp}  Self-contained touch QWERTY keyboard
+partitions.csv         8 MB layout (nvs + ota apps + spiffs + fat)
+src/Picoware/          Vendored Picoware core, ported to the ESP32-C5 Pancake
 ```
 
-### Hybrid input model
-`TouchInput` (FT6336) both maps screen tap-zones to Picoware's `BUTTON_*` codes —
-so Picoware's existing button-navigated views and games work unchanged — and
-exposes a raw touch point for direct-tap menus. FlipWorld (M3) will get an
-on-screen d-pad overlay driving those button codes.
+## Credits
+
+- **[JBlanked](https://www.jblanked.com/)** — the **FlipSocial** app and API, and
+  **[Picoware](https://github.com/jblanked/Picoware)**, which this firmware is built on.
