@@ -1115,18 +1115,9 @@ static bool fsOnline() {
   return true;
 }
 
-static void fsFlip(FSMsg &m) {
-  if (!fsOnline()) return;
-  String payload = String("{\"username\":\"") + fsUser() + "\",\"post_id\":\"" + m.id + "\"}";
-  fsRequest("POST", "https://www.jblanked.com/flipper/api/feed/flip/", payload);
-  m.flipped = !m.flipped;
-  m.flips += m.flipped ? 1 : -1;
-  if (m.flips < 0) m.flips = 0;
-}
-
-static int g_commentsAdded = 0;   // # comments added in the current comments view
-
-static bool fsOk(const String &r) { return r.indexOf("SUCCESS") != -1; }
+// Every write endpoint answers "[SUCCESS]..." on success (same token the
+// FlipSocial app matches on); anything else is a failure worth reporting.
+static bool fsOk(const String &r) { return r.indexOf("[SUCCESS]") != -1; }
 
 // Extract a short human-readable reason from a failed API response (like the app).
 static String fsReason(const String &resp) {
@@ -1146,6 +1137,31 @@ static String fsReason(const String &resp) {
   if (s.startsWith("[")) { int e = s.indexOf(']'); if (e >= 0) { s = s.substring(e + 1); s.trim(); } }
   if (s.length() > 96) s = s.substring(0, 96);
   return s.length() ? s : String("Unknown error");
+}
+
+// Reason from the last failed write, so helpers that only return bool can still
+// tell the caller's dialog what the server actually said.
+static String g_fsErr;
+static bool fsOkOr(const String &r) {
+  if (fsOk(r)) { g_fsErr = ""; return true; }
+  g_fsErr = fsReason(r);
+  return false;
+}
+
+static int g_commentsAdded = 0;   // # comments added in the current comments view
+
+// The request is synchronous, so only move the local flip state once the server
+// has confirmed it — otherwise a rejected flip still reads as applied until the
+// next reload.
+static void fsFlip(FSMsg &m) {
+  if (!fsOnline()) return;
+  String payload = String("{\"username\":\"") + jsonEsc(fsUser()) + "\",\"post_id\":\"" + m.id + "\"}";
+  String r = fsRequest("POST", "https://www.jblanked.com/flipper/api/feed/flip/", payload);
+  if (!fsOk(r)) { ledErr(); msgScreen("Flip", "Failed", fsReason(r), TFT_RED); ledOff(); return; }
+  ledOk(); ledOff();
+  m.flipped = !m.flipped;
+  m.flips += m.flipped ? 1 : -1;
+  if (m.flips < 0) m.flips = 0;
 }
 
 // Credential check. The profile endpoint needs no auth, so a wrong password
@@ -1192,7 +1208,7 @@ static FSProfile fsLoadProfile(const String &who) {
 static bool fsChangeBio(const String &bio) {
   String payload = String("{\"username\":\"") + jsonEsc(fsUser()) + "\",\"bio\":\"" + jsonEsc(bio) + "\"}";
   String r = fsRequest("POST", "https://www.jblanked.com/flipper/api/user/change-bio/", payload);
-  return r.indexOf("SUCCESS") != -1 || r.indexOf("success") != -1;
+  return fsOkOr(r);
 }
 // GET /user/friends/{user}/{max}/ -> {"friends":[username, ...]}
 static int fsLoadFriends(String *arr, int maxN) {
@@ -1207,15 +1223,15 @@ static int fsLoadFriends(String *arr, int maxN) {
   return n;
 }
 static bool fsAddFriend(const String &friendName) {
-  String payload = String("{\"username\":\"") + fsUser() + "\",\"friend\":\"" + friendName + "\"}";
+  String payload = String("{\"username\":\"") + jsonEsc(fsUser()) + "\",\"friend\":\"" + jsonEsc(friendName) + "\"}";
   String r = fsRequest("POST", "https://www.jblanked.com/flipper/api/user/add-friend/", payload);
-  return r.indexOf("SUCCESS") != -1 || r.indexOf("success") != -1;
+  return fsOkOr(r);
 }
 static bool fsRemoveFriend(const String &friendName) {
   if (!fsOnline()) return false;
-  String payload = String("{\"username\":\"") + fsUser() + "\",\"friend\":\"" + friendName + "\"}";
+  String payload = String("{\"username\":\"") + jsonEsc(fsUser()) + "\",\"friend\":\"" + jsonEsc(friendName) + "\"}";
   String r = fsRequest("POST", "https://www.jblanked.com/flipper/api/user/remove-friend/", payload);
-  return r.indexOf("SUCCESS") != -1 || r.indexOf("success") != -1;
+  return fsOkOr(r);
 }
 
 // Messages API (jblanked messages endpoints)
@@ -1775,7 +1791,9 @@ static void friendsScreen() {
     }
     int sel = scrollList("Friends", fr, n, true);
     if (sel < 0) return;
-    if (sel >= 0 && sel < n && confirmDialog(String("Remove ") + fr[sel] + "?", "")) fsRemoveFriend(fr[sel]);
+    if (sel >= 0 && sel < n && confirmDialog(String("Remove ") + fr[sel] + "?", "")) {
+      if (!fsRemoveFriend(fr[sel])) msgScreen("Friends", "Remove failed", g_fsErr, TFT_RED);
+    }
   }
 }
 
@@ -1796,7 +1814,8 @@ static void profileScreen() {
                 char b[160] = {0}; strncpy(b, p.bio.c_str(), sizeof(b) - 1);
                 if (touchKeyboardInput(*tft, COL_FG, COL_BG, b, sizeof(b), "Edit Bio:", false)) {
                   bool ok = fsChangeBio(String(b));
-                  msgScreen("Bio", ok ? "Bio updated" : "Update failed", "", ok ? COL_OK : TFT_RED);
+                  msgScreen("Bio", ok ? "Bio updated" : "Update failed", ok ? String("") : g_fsErr,
+                            ok ? COL_OK : TFT_RED);
                 }
               } break;
       case 2: if (fsUserSet()) friendsScreen(); break;              // Friends — offline ok
@@ -1805,7 +1824,8 @@ static void profileScreen() {
                 if (touchKeyboardInput(*tft, COL_FG, COL_BG, b, sizeof(b), "Add friend (username):", false)
                     && strlen(b)) {
                   bool ok = fsAddFriend(String(b));
-                  msgScreen("Add Friend", ok ? "Request sent" : "Failed", String(b), ok ? COL_OK : TFT_RED);
+                  msgScreen("Add Friend", ok ? "Request sent" : "Failed",
+                            ok ? String(b) : g_fsErr, ok ? COL_OK : TFT_RED);
                 }
               } break;
       case 4: if (fsUserSet()) myPostsScreen(); break;              // My Posts — offline ok
@@ -1834,7 +1854,8 @@ static void exploreUserScreen(const String &who) {
     if (sel == 0) profileInfoScreen(who);
     else if (sel == 1) {
       bool ok = fsAddFriend(who);
-      msgScreen("Add Friend", ok ? "Request sent" : "Failed", who, ok ? COL_OK : TFT_RED);
+      msgScreen("Add Friend", ok ? "Request sent" : "Failed", ok ? who : g_fsErr,
+                ok ? COL_OK : TFT_RED);
     } else if (sel == 2) {
       FSVResult rr;
       do { rr = messagesThreadScreen(who); } while (rr != FSV_BACK);   // no list to page here
