@@ -71,6 +71,7 @@ static const int CONTENTY = HDRH;
 struct FSMsg { uint32_t id; String user, msg, date; int flips, comments; bool flipped; };
 struct FSProfile { String bio, joined; int friends; bool ok; };
 enum FSVResult { FSV_BACK, FSV_PREV, FSV_NEXT };
+enum FSCred { FSC_OK, FSC_NOUSER, FSC_BADPASS, FSC_EMPTY, FSC_ERR };
 
 // Touch helpers
 // Wait for a fresh tap (press edge) and return its point; blocks.
@@ -983,14 +984,37 @@ static bool   g_usingCache = false;   // on-screen data came from the SD cache (
 
 static String fsUser() { return credGet("user"); }
 
-static String fsRequest(const char *method, const String &url, const String &payload = "") {
+// Escape a user-typed string so it is safe inside a JSON string literal. Without
+// this a typed " or \ produces malformed JSON and the API rejects the request.
+static String jsonEsc(const String &s) {
+  String o; o.reserve(s.length() + 8);
+  for (unsigned i = 0; i < s.length(); i++) {
+    char c = s[i];
+    switch (c) {
+      case '"':  o += "\\\""; break;
+      case '\\': o += "\\\\"; break;
+      case '\n': o += "\\n";  break;
+      case '\r': o += "\\r";  break;
+      case '\t': o += "\\t";  break;
+      default:
+        if ((uint8_t)c < 0x20) { char u[8]; snprintf(u, sizeof(u), "\\u%04x", (unsigned)(uint8_t)c); o += u; }
+        else o += c;
+    }
+  }
+  return o;
+}
+
+// auth=false sends only Content-Type — the login/register endpoints take the
+// credentials in the payload, and that matches the FlipSocial app's headers.
+static String fsRequest(const char *method, const String &url, const String &payload = "",
+                        bool auth = true) {
   HTTP http;
   String u = credGet("user");
   String p = credGet("pass");
   const char *hk[] = {"Content-Type", "Username", "Password"};
   const char *hv[] = {"application/json", u.c_str(), p.c_str()};
   ledHttp();                                 // blue while the HTTP request is in flight
-  String r = http.request(method, url, payload, hk, hv, 3);
+  String r = http.request(method, url, payload, hk, hv, auth ? 3 : 1);
   ledOff();
   return r;
 }
@@ -1124,6 +1148,32 @@ static String fsReason(const String &resp) {
   return s.length() ? s : String("Unknown error");
 }
 
+// Credential check. The profile endpoint needs no auth, so a wrong password
+// still renders a perfectly good profile and only shows up later when a post
+// fails. POST /user/login/ is the API's own verification; the response strings
+// below are the ones the FlipSocial app matches on. (FSCred is declared at the
+// top of the file so Arduino's auto-generated prototypes can see it.)
+static FSCred fsCheckCreds() {
+  String u = credGet("user"), p = credGet("pass");
+  if (!u.length() || !p.length()) return FSC_EMPTY;
+  String payload = String("{\"username\":\"") + jsonEsc(u) + "\",\"password\":\"" + jsonEsc(p) + "\"}";
+  String r = fsRequest("POST", "https://www.jblanked.com/flipper/api/user/login/", payload, false);
+  if (r.indexOf("[SUCCESS]") >= 0)                     return FSC_OK;
+  if (r.indexOf("User not found") >= 0)                return FSC_NOUSER;
+  if (r.indexOf("Incorrect password") >= 0)            return FSC_BADPASS;
+  if (r.indexOf("Username or password is empty.") >= 0) return FSC_EMPTY;
+  return FSC_ERR;
+}
+static const char *fsCredText(FSCred c) {
+  switch (c) {
+    case FSC_OK:      return "Credentials verified";
+    case FSC_NOUSER:  return "User not found - check Settings";
+    case FSC_BADPASS: return "Incorrect password";
+    case FSC_EMPTY:   return "Username / password not set";
+    default:          return "Could not verify credentials";
+  }
+}
+
 // Profile / friends API (jblanked user endpoints)
 // GET /user/profile/{user}/ -> {"bio","friends_count","date_created"}
 static FSProfile fsLoadProfile(const String &who) {
@@ -1140,7 +1190,7 @@ static FSProfile fsLoadProfile(const String &who) {
   return p;
 }
 static bool fsChangeBio(const String &bio) {
-  String payload = String("{\"username\":\"") + fsUser() + "\",\"bio\":\"" + bio + "\"}";
+  String payload = String("{\"username\":\"") + jsonEsc(fsUser()) + "\",\"bio\":\"" + jsonEsc(bio) + "\"}";
   String r = fsRequest("POST", "https://www.jblanked.com/flipper/api/user/change-bio/", payload);
   return r.indexOf("SUCCESS") != -1 || r.indexOf("success") != -1;
 }
@@ -1200,26 +1250,6 @@ static int fsLoadMessages(FSMsg *arr, const String &peer) {
   }
   return n;
 }
-// Escape a user-typed string so it is safe inside a JSON string literal. Without
-// this a typed " or \ produces malformed JSON and the API rejects the request.
-static String jsonEsc(const String &s) {
-  String o; o.reserve(s.length() + 8);
-  for (unsigned i = 0; i < s.length(); i++) {
-    char c = s[i];
-    switch (c) {
-      case '"':  o += "\\\""; break;
-      case '\\': o += "\\\\"; break;
-      case '\n': o += "\\n";  break;
-      case '\r': o += "\\r";  break;
-      case '\t': o += "\\t";  break;
-      default:
-        if ((uint8_t)c < 0x20) { char u[8]; snprintf(u, sizeof(u), "\\u%04x", (unsigned)(uint8_t)c); o += u; }
-        else o += c;
-    }
-  }
-  return o;
-}
-
 // POST /messages/{me}/post/  body {"receiver","content"}
 static bool fsSendMessage(const String &peer, const String &content) {
   if (!fsOnline()) return false;
@@ -1689,16 +1719,33 @@ static void profileInfoScreen(const String &who) {
   tft->setTextColor(COL_DIM, COL_BG); tft->setTextDatum(MC_DATUM);
   tft->drawString("Loading...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
   FSProfile p = fsLoadProfile(who);
+
+  // Only meaningful for your own profile, and only if we can actually reach the
+  // API (a cached profile tells us nothing about whether the password works).
+  bool self    = who.length() && who == fsUser();
+  bool live    = (WiFi.status() == WL_CONNECTED) && !g_usingCache;
+  bool checked = false;
+  FSCred cred  = FSC_ERR;
+  if (self && live) { cred = fsCheckCreds(); checked = true; }
+
   tft->fillRect(0, HDRH, SCRW, SCRH - HDRH, COL_BG);
   if (g_usingCache) drawHeader("Profile  [offline]", true);
   if (!p.ok) {
-    statusLine(g_usingCache ? "Offline - no cached profile." : "Could not load profile.", TFT_RED);
+    // If the credential check knows why, say that instead of a generic failure.
+    if (checked && cred != FSC_OK) statusLine(fsCredText(cred), TFT_RED);
+    else statusLine(g_usingCache ? "Offline - no cached profile." : "Could not load profile.", TFT_RED);
     uint16_t x, y; waitTap(x, y); return;
   }
 
   int y = CONTENTY + 14;
   tft->setTextColor(COL_FG, COL_BG); tft->setTextDatum(TL_DATUM);
-  tft->drawString(String("@") + who, 14, y, 4); y += 36;
+  tft->drawString(String("@") + who, 14, y, 4); y += 30;
+  if (self) {
+    uint16_t c = !checked ? COL_DIM : (cred == FSC_OK ? COL_OK : TFT_RED);
+    tft->setTextColor(c, COL_BG);
+    tft->drawString(checked ? fsCredText(cred) : "Credentials not checked (offline)", 14, y, 2);
+    y += 24;
+  } else y += 6;
   tft->setTextColor(COL_DIM, COL_BG);
   tft->drawString(String("Friends: ") + p.friends, 14, y, 2); y += 22;
   if (p.joined.length()) { tft->drawString(String("Joined: ") + p.joined, 14, y, 2); y += 26; }
