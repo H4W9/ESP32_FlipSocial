@@ -976,6 +976,11 @@ enum { FS_FEED = 0, FS_COMMENTS = 1, FS_MYPOSTS = 2, FS_MESSAGES = 3 };
 static String g_msgPeer;              // current message-thread peer (for reload/send)
 static bool   g_usingCache = false;   // on-screen data came from the SD cache (offline)
 
+// Max chars the API accepts for a post / comment / message body. Matches
+// MAX_MESSAGE_LENGTH in the canonical FlipSocial app, which rejects anything
+// longer client-side; sending more gets refused by the server.
+#define FS_MAX_MESSAGE 100
+
 static String fsUser() { return credGet("user"); }
 
 static String fsRequest(const char *method, const String &url, const String &payload = "") {
@@ -1105,7 +1110,13 @@ static String fsReason(const String &resp) {
   JsonDocument d;
   if (!deserializeJson(d, resp)) {
     const char *keys[] = { "error", "message", "detail", "reason" };
-    for (const char *k : keys) { String s = d[k].as<String>(); if (s.length()) return s; }
+    // ArduinoJson 7: as<String>() on a missing key yields the literal "null",
+    // so skip absent keys explicitly rather than testing the string length.
+    for (const char *k : keys) {
+      if (d[k].isNull()) continue;
+      String s = d[k].as<String>();
+      if (s.length()) return s;
+    }
   }
   String s = resp; s.trim();
   if (s.startsWith("[")) { int e = s.indexOf(']'); if (e >= 0) { s = s.substring(e + 1); s.trim(); } }
@@ -1189,10 +1200,30 @@ static int fsLoadMessages(FSMsg *arr, const String &peer) {
   }
   return n;
 }
+// Escape a user-typed string so it is safe inside a JSON string literal. Without
+// this a typed " or \ produces malformed JSON and the API rejects the request.
+static String jsonEsc(const String &s) {
+  String o; o.reserve(s.length() + 8);
+  for (unsigned i = 0; i < s.length(); i++) {
+    char c = s[i];
+    switch (c) {
+      case '"':  o += "\\\""; break;
+      case '\\': o += "\\\\"; break;
+      case '\n': o += "\\n";  break;
+      case '\r': o += "\\r";  break;
+      case '\t': o += "\\t";  break;
+      default:
+        if ((uint8_t)c < 0x20) { char u[8]; snprintf(u, sizeof(u), "\\u%04x", (unsigned)(uint8_t)c); o += u; }
+        else o += c;
+    }
+  }
+  return o;
+}
+
 // POST /messages/{me}/post/  body {"receiver","content"}
 static bool fsSendMessage(const String &peer, const String &content) {
   if (!fsOnline()) return false;
-  String payload = String("{\"receiver\":\"") + peer + "\",\"content\":\"" + content + "\"}";
+  String payload = String("{\"receiver\":\"") + jsonEsc(peer) + "\",\"content\":\"" + jsonEsc(content) + "\"}";
   String r = fsRequest("POST", "https://www.jblanked.com/flipper/api/messages/" + fsUser() + "/post/", payload);
   bool ok = fsOk(r);
   if (!ok) { ledErr(); msgScreen("Message", "Failed", fsReason(r), TFT_RED); } else ledOk();
@@ -1216,10 +1247,10 @@ static int fsExplore(const String &keyword, String *arr, int maxN) {
 // Returns true if a comment was successfully added.
 static bool fsAddComment(uint32_t postId) {
   if (!fsOnline()) return false;
-  char b[256] = {0};
+  char b[FS_MAX_MESSAGE + 1] = {0};
   if (!touchKeyboardInput(*tft, COL_FG, COL_BG, b, sizeof(b), "Comment:", false)) return false;
   if (strlen(b) == 0) return false;
-  String payload = String("{\"username\":\"") + fsUser() + "\",\"content\":\"" + b + "\",\"post_id\":\"" + postId + "\"}";
+  String payload = String("{\"username\":\"") + jsonEsc(fsUser()) + "\",\"content\":\"" + jsonEsc(b) + "\",\"post_id\":\"" + postId + "\"}";
   String r = fsRequest("POST", "https://www.jblanked.com/flipper/api/feed/comment/", payload);
   bool ok = fsOk(r);
   if (!ok) { ledErr(); msgScreen("Comment", "Failed", fsReason(r), TFT_RED); } else ledOk();
@@ -1229,11 +1260,11 @@ static bool fsAddComment(uint32_t postId) {
 
 static void fsPost() {
   if (!fsOnline()) return;
-  char b[256] = {0};
+  char b[FS_MAX_MESSAGE + 1] = {0};
   if (!touchKeyboardInput(*tft, COL_FG, COL_BG, b, sizeof(b), "New Post:", false)) return;
   if (strlen(b) == 0) return;
   tft->fillScreen(COL_BG); drawHeader("New Post", true); statusLine("Posting...");
-  String payload = String("{\"username\":\"") + fsUser() + "\",\"content\":\"" + b + "\"}";
+  String payload = String("{\"username\":\"") + jsonEsc(fsUser()) + "\",\"content\":\"" + jsonEsc(b) + "\"}";
   String r = fsRequest("POST", "https://www.jblanked.com/flipper/api/feed/post/", payload);
   bool ok = fsOk(r);
   if (ok) ledOk(); else ledErr();
@@ -1475,7 +1506,7 @@ static FSVResult fsViewer(FSMsg *arr, int n, const String &title, int mode, uint
             if (nh == 0) { spr.deleteSprite(); return FSV_PREV; }   // previous conversation
             if (nh == 2) { spr.deleteSprite(); return FSV_NEXT; }   // next conversation
             if (nh == 1) {                                 // Send Message
-              char b[256] = {0};
+              char b[FS_MAX_MESSAGE + 1] = {0};
               if (touchKeyboardInput(*tft, COL_FG, COL_BG, b, sizeof(b), "Message:", false) && strlen(b))
                 fsSendMessage(g_msgPeer, String(b));
               n = fsLoadMessages(arr, g_msgPeer); relayout(); scroll = 0;
