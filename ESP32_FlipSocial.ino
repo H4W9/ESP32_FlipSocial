@@ -117,17 +117,26 @@ static void applyThemeToViewManager() {
 #endif
 // Colours are full-intensity hues; ledRGB scales them by the LED-brightness
 // setting (0..20, where 0 = off). Default 4 keeps the LED gentle.
+//
+// The RGB LED is WS2812-style: consecutive frames must be separated by a reset
+// gap (>50us idle low) or the LED latches the first frame and passes the next
+// one down the chain — so a colour followed immediately by off stays lit. Hold
+// off before every frame so back-to-back writes always land.
+static inline void ledGap() { delayMicroseconds(300); }
 static void ledRGB(uint8_t r, uint8_t g, uint8_t b) {
   uint16_t s = theme.led_bright;
+  ledGap();
   rgbLedWrite(PW_RGB_PIN, (uint8_t)((uint16_t)r * s / 20),
                           (uint8_t)((uint16_t)g * s / 20),
                           (uint8_t)((uint16_t)b * s / 20));
 }
-static inline void ledOff()  { rgbLedWrite(PW_RGB_PIN, 0, 0, 0); }   // truly off
+static inline void ledOff()  { ledGap(); rgbLedWrite(PW_RGB_PIN, 0, 0, 0); }  // truly off
 static inline void ledWifi() { ledRGB(255, 150, 0); }  // amber — scanning / connecting
 static inline void ledHttp() { ledRGB(0,   80, 255); } // blue  — HTTP request in flight
 static inline void ledOk()   { ledRGB(0,  255,   0); } // green — success
 static inline void ledErr()  { ledRGB(255,  0,   0); } // red   — error
+// Success blink for actions that finish too fast for a bare ledOk() to be seen.
+static inline void ledBlinkOk(uint16_t ms = 150) { ledOk(); delay(ms); ledOff(); }
 // Back-compat shim: old on/off calls map to the WiFi (amber) colour.
 static void ledSet(bool on) { if (on) ledWifi(); else ledOff(); }
 
@@ -1158,7 +1167,7 @@ static void fsFlip(FSMsg &m) {
   String payload = String("{\"username\":\"") + jsonEsc(fsUser()) + "\",\"post_id\":\"" + m.id + "\"}";
   String r = fsRequest("POST", "https://www.jblanked.com/flipper/api/feed/flip/", payload);
   if (!fsOk(r)) { ledErr(); msgScreen("Flip", "Failed", fsReason(r), TFT_RED); ledOff(); return; }
-  ledOk(); ledOff();
+  ledBlinkOk();
   m.flipped = !m.flipped;
   m.flips += m.flipped ? 1 : -1;
   if (m.flips < 0) m.flips = 0;
@@ -1272,8 +1281,8 @@ static bool fsSendMessage(const String &peer, const String &content) {
   String payload = String("{\"receiver\":\"") + jsonEsc(peer) + "\",\"content\":\"" + jsonEsc(content) + "\"}";
   String r = fsRequest("POST", "https://www.jblanked.com/flipper/api/messages/" + fsUser() + "/post/", payload);
   bool ok = fsOk(r);
-  if (!ok) { ledErr(); msgScreen("Message", "Failed", fsReason(r), TFT_RED); } else ledOk();
-  ledOff();
+  if (!ok) { ledErr(); msgScreen("Message", "Failed", fsReason(r), TFT_RED); ledOff(); }
+  else ledBlinkOk();
   return ok;
 }
 
@@ -1299,8 +1308,8 @@ static bool fsAddComment(uint32_t postId) {
   String payload = String("{\"username\":\"") + jsonEsc(fsUser()) + "\",\"content\":\"" + jsonEsc(b) + "\",\"post_id\":\"" + postId + "\"}";
   String r = fsRequest("POST", "https://www.jblanked.com/flipper/api/feed/comment/", payload);
   bool ok = fsOk(r);
-  if (!ok) { ledErr(); msgScreen("Comment", "Failed", fsReason(r), TFT_RED); } else ledOk();
-  ledOff();
+  if (!ok) { ledErr(); msgScreen("Comment", "Failed", fsReason(r), TFT_RED); ledOff(); }
+  else ledBlinkOk();
   return ok;
 }
 
