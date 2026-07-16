@@ -9,7 +9,7 @@
 #include <Arduino.h>
 #include <SPIFFS.h>
 
-// ── Colour themes (RGB565): bg, fg, header, dim, dark?, name ─────────────────
+// Colour themes (RGB565): bg, fg, header, dim, dark?, name
 struct ThemeDef { uint16_t bg, fg, hdr, dim; bool dark; const char *name; };
 static const ThemeDef PW_THEMES[] = {
     { 0x0000, 0xFFFF, 0x1082, 0x7BEF, true,  "Dark"    },
@@ -41,7 +41,7 @@ static const uint16_t PW_NEON_HUES[] = {
 };
 static const uint8_t PW_NEON_COUNT = 8;
 
-// ── Accent palette (selection highlight): 24 darks + 24 lights ───────────────
+// Accent palette (selection highlight): 24 darks + 24 lights
 static const uint16_t PW_ACCENT_DARK[] = {
     0x0460, 0x0282, 0x03CA, 0x0350, 0x03D9, 0x047B, 0x0291, 0x0339,
     0x0213, 0x2813, 0x5016, 0x500F, 0x6009, 0xA00C, 0x8803, 0x5800,
@@ -59,7 +59,7 @@ static const char *const PW_ACCENT_NAMES[] = {
 };
 static const uint8_t PW_ACCENT_COUNT = 24;
 
-// ── Font-colour palette (H4W9 Font Color). Index 0 = "Default" (theme fg).
+// Font-colour palette (H4W9 Font Color). Index 0 = "Default" (theme fg).
 static const char *const PW_FONTCOL_NAMES[] = {
     "Default", "White", "Silver", "Light Gray", "Gray", "Dim Gray",
     "Dark Gray", "Charcoal", "Black",
@@ -73,7 +73,7 @@ static const uint16_t PW_FONTCOL_VAL[] = {
 };
 static const uint8_t PW_FONTCOL_COUNT = 24;
 
-// ── Theme state (persisted to SPIFFS: /pico_ui.dat) ──────────────────────────
+// Theme state (persisted to SPIFFS: /pico_ui.dat)
 // acc_by_theme / fc_by_theme are indexed by theme; value 0 = "Default", so each
 // theme keeps its own accent + font-colour choices (defaults per theme).
 struct Theme {

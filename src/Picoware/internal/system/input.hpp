@@ -5,7 +5,6 @@
 #include "../../internal/system/buttons.hpp"
 namespace Picoware
 {
-    // ─────────────────────────────────────────────────────────────────────────
     // TouchInput — FT6336 capacitive touch for the Pancake board.
     //
     // Produces two things each run():
@@ -17,7 +16,6 @@ namespace Picoware
     //     views that want direct hit-testing (the hybrid touch UI).
     // Assumes Wire.begin() + FT6336 reset has already run (done in the sketch
     // setup via ft6336_init()).
-    // ─────────────────────────────────────────────────────────────────────────
     class TouchInput
     {
     public:
@@ -42,10 +40,8 @@ namespace Picoware
         static const uint32_t DEBOUNCE_MS = 120;
     };
 
-    // ─────────────────────────────────────────────────────────────────────────
     // Input — a single logical input source. Pancake uses the TouchInput backend;
     // the (pin, button) GPIO backend is retained for boards with physical buttons.
-    // ─────────────────────────────────────────────────────────────────────────
     class Input
     {
     public:

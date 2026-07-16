@@ -39,7 +39,7 @@
 #include "src/Picoware/internal/system/view_manager.hpp"
 using namespace Picoware;
 
-// ── Globals ─────────────────────────────────────────────────────────────────
+// Globals
 #ifdef HAS_C5_SD
 SPIClass sharedSPI(SPI);
 #endif
@@ -72,7 +72,7 @@ struct FSMsg { uint32_t id; String user, msg, date; int flips, comments; bool fl
 struct FSProfile { String bio, joined; int friends; bool ok; };
 enum FSVResult { FSV_BACK, FSV_PREV, FSV_NEXT };
 
-// ── Touch helpers ───────────────────────────────────────────────────────────
+// Touch helpers
 // Wait for a fresh tap (press edge) and return its point; blocks.
 static bool waitTap(uint16_t &x, uint16_t &y, uint32_t timeoutMs = 0) {
   uint32_t start = millis();
@@ -92,7 +92,7 @@ static bool inRect(uint16_t x, uint16_t y, int rx, int ry, int rw, int rh) {
   return (int)x >= rx && (int)x < rx + rw && (int)y >= ry && (int)y < ry + rh;
 }
 
-// ── Theme / brightness plumbing ──────────────────────────────────────────────
+// Theme / brightness plumbing
 static void applyBrightness() {
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
   ledcWrite(TFT_BL, theme.duty());
@@ -130,7 +130,7 @@ static inline void ledErr()  { ledRGB(255,  0,   0); } // red   — error
 // Back-compat shim: old on/off calls map to the WiFi (amber) colour.
 static void ledSet(bool on) { if (on) ledWifi(); else ledOff(); }
 
-// ── FlipSocial credentials (SPIFFS: /pico_user.json) ─────────────────────────
+// FlipSocial credentials (SPIFFS: /pico_user.json)
 static String credGet(const char *key) {
   File f = SPIFFS.open("/pico_user.json", FILE_READ);
   if (!f) return "";
@@ -151,7 +151,7 @@ static void credSet(const char *key, const String &val) {
   w.close();
 }
 
-// ── Saved WiFi networks (SPIFFS: /pico_wifi.json = {"nets":[{"s","p"}]}) ──────
+// Saved WiFi networks (SPIFFS: /pico_wifi.json = {"nets":[{"s","p"}]})
 static const int WIFI_MAX_SAVED = 12;
 static int wifiLoad(String *ss, String *pp, int maxN) {
   File f = SPIFFS.open("/pico_wifi.json", FILE_READ);
@@ -215,7 +215,7 @@ static void wifiForget(const String &ssid) {
   wifiWriteAll(os, op, m);
 }
 
-// ── Battery fuel gauge (MAX17048, I2C 0x36, shared bus) ──────────────────────
+// Battery fuel gauge (MAX17048, I2C 0x36, shared bus)
 // SOC register 0x04: high byte = integer %, low byte = 1/256 % (discarded).
 static int      g_battPct = -1;      // -1 = unknown / gauge absent
 static bool     g_battOk  = false;
@@ -241,7 +241,7 @@ static void battUpdate() {
 // True while a saved-network connect attempt is in flight (header icon = yellow).
 static volatile bool g_wifiConnecting = false;
 
-// ── Rendering helpers ─────────────────────────────────────────────────────────
+// Rendering helpers
 // One 90°-wide WiFi arc (a real wifi-fan wedge: ±45° around straight up),
 // plotted point-by-point so it doesn't depend on any drawArc angle convention.
 static void wifiArc(int cx, int cy, int r, uint16_t c) {
@@ -485,8 +485,8 @@ static void statusLine(const char *msg, uint16_t col = 0xFFFF) {
   tft->setTextDatum(TL_DATUM);
 }
 
-// ── Settings chip rows: label + [<] value [>] (or [-] value [+]) ─────────────
-// ── Settings rows (H4W9 choiceRow layout) ─────────────────────────────
+// Settings chip rows: label + [<] value [>] (or [-] value [+])
+// Settings rows (H4W9 choiceRow layout)
 // [<] value [>] with fixed-right buttons (28x22). Selected row highlights with
 // sel_bg. `valcol` = colour to draw the value text (0 = follow font colour).
 static const int CHIP_W = 28, CHIP_H = 22;
@@ -568,7 +568,7 @@ static void msgScreen(const char *title, const String &a, const String &b, uint1
   uint16_t x, y2; waitTap(x, y2);
 }
 
-// ── WiFi ──────────────────────────────────────────────────────────────────────
+// WiFi
 // Last STA disconnect reason (WIFI_REASON_*): 15 = 4-way handshake timeout
 // (usually wrong password), 201 = no AP found (band/channel), 205 = conn fail.
 static volatile int g_wifiReason = 0;
@@ -835,7 +835,7 @@ static void wifiDebug() {
   }
 }
 
-// ── Settings (H4W9 layout: highlight on tap, partial redraw, no flash) ──
+// Settings (H4W9 layout: highlight on tap, partial redraw, no flash)
 static const int SET_N = 10;  // Theme, Accent, Font Color, Brightness, LED, WiFi, Debug, User, Pass, About
 // Value string for the chip rows that need it for hit-testing.
 static String setChipVal(int row) {
@@ -982,15 +982,15 @@ static String fsRequest(const char *method, const String &url, const String &pay
   HTTP http;
   String u = credGet("user");
   String p = credGet("pass");
-  const char *hk[] = {"Content-Type", "HTTP_USER_AGENT", "HTTP_ACCEPT", "username", "password"};
-  const char *hv[] = {"application/json", "Pico", "X-Flipper-Redirect", u.c_str(), p.c_str()};
+  const char *hk[] = {"Content-Type", "Username", "Password"};
+  const char *hv[] = {"application/json", u.c_str(), p.c_str()};
   ledHttp();                                 // blue while the HTTP request is in flight
-  String r = http.request(method, url, payload, hk, hv, 5);
+  String r = http.request(method, url, payload, hk, hv, 3);
   ledOff();
   return r;
 }
 
-// ── Offline cache (SD /fs_cache) ─────────────────────────────────────────────
+// Offline cache (SD /fs_cache)
 // Feed / comments / messages / profile responses are cached to SD so they can be
 // shown when WiFi is down. Sets g_usingCache when the on-screen data is from cache.
 static String cacheName(const char *prefix, const String &key) {
@@ -1113,7 +1113,7 @@ static String fsReason(const String &resp) {
   return s.length() ? s : String("Unknown error");
 }
 
-// ── Profile / friends API (jblanked user endpoints) ───────────────────────────
+// Profile / friends API (jblanked user endpoints)
 // GET /user/profile/{user}/ -> {"bio","friends_count","date_created"}
 static FSProfile fsLoadProfile(const String &who) {
   FSProfile p; p.ok = false; p.friends = 0;
@@ -1157,7 +1157,7 @@ static bool fsRemoveFriend(const String &friendName) {
   return r.indexOf("SUCCESS") != -1 || r.indexOf("success") != -1;
 }
 
-// ── Messages API (jblanked messages endpoints) ────────────────────────────────
+// Messages API (jblanked messages endpoints)
 // GET /messages/{me}/get/list/{max}/ -> {"users":[username, ...]} (conversations)
 static int fsLoadMsgUsers(String *arr, int maxN) {
   String url = "https://www.jblanked.com/flipper/api/messages/" + fsUser() + "/get/list/" + String(maxN) + "/";
@@ -1787,7 +1787,7 @@ static void exploreScreen() {
   }
 }
 
-// ── Main menu (H4W9-style large rounded buttons) ───────────────────────
+// Main menu (H4W9-style large rounded buttons)
 static const char *MENU_ITEMS[] = { "Feed", "New Post", "Messages", "Explore", "Profile", "Settings" };
 static const int    MENU_COUNT  = 6;
 static const int    MENU_MARGIN = 16;
@@ -1868,7 +1868,7 @@ static void mainMenuRun(ViewManager *viewManager) {
 
 static const PROGMEM View mainMenuView = View("MainMenu", mainMenuRun, mainMenuStart, nullptr);
 
-// ── Arduino entry points ──────────────────────────────────────────────────────
+// Arduino entry points
 void setup() {
   randomSeed(esp_random());
 #ifndef DEVELOPER

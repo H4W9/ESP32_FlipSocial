@@ -2,20 +2,16 @@
 #ifndef configs_h
 #define configs_h
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Pancake Picoware — hardware config
 //   Board: ESP32-C5, ST7796 320×480, FT6336 capacitive touch (I2C), PSRAM, SD.
 //   This mirrors the MARAUDER_PANCAKE block from the H4W9 firmware so the shared
 //   assets (ft6336.h, touch keyboard) compile unchanged.
-// ─────────────────────────────────────────────────────────────────────────────
 
 #define MARAUDER_PANCAKE
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Firmware identity — shown on the Settings → About screen.
 // Bump FW_VERSION when cutting a release. FW_COMMIT is stamped by CI at build
 // time (see .github/workflows/build.yml); it stays "dev" for local builds.
-// ─────────────────────────────────────────────────────────────────────────────
 #define FW_NAME    "FlipSocial"
 #define FW_AUTHOR  "H4W9"
 #define FW_VERSION "1.0.1"

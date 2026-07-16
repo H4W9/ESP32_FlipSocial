@@ -15,9 +15,7 @@
 #  define KB_XPT_THRESHOLD 600
 #endif
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Layout
-// ─────────────────────────────────────────────────────────────────────────────
 static const int KB_ROWS = 5;   // 4 char rows + 1 control row
 static const int KB_COLS = 10;
 
@@ -36,17 +34,13 @@ static const char ROW3_SYM[] = ",./?";         // centered
 
 enum KbLayout { KB_ALPHA = 0, KB_SYMBOLS };
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Geometry helpers — keyboard occupies the bottom half of the screen.
-// ─────────────────────────────────────────────────────────────────────────────
 static inline int16_t kbH(uint16_t sh)   { return (int16_t)(sh / 2); }
 static inline int16_t kbY(uint16_t sh)   { return (int16_t)(sh - kbH(sh)); }
 static inline int16_t cellW(uint16_t sw) { return (int16_t)(sw / KB_COLS); }
 static inline int16_t cellH(uint16_t sh) { return (int16_t)(kbH(sh) / KB_ROWS); }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Touch polling (raw, no debounce — debounce handled below)
-// ─────────────────────────────────────────────────────────────────────────────
 static bool kb_rawTouch(TFT_eSPI& tft, uint16_t* x, uint16_t* y) {
 #ifdef HAS_CAP_TOUCH
     if (!ft6336_update(x, y)) return false;
@@ -68,9 +62,7 @@ static bool kb_rawTouch(TFT_eSPI& tft, uint16_t* x, uint16_t* y) {
 #endif
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Drawing
-// ─────────────────────────────────────────────────────────────────────────────
 // Bounds of the SHOW/HIDE toggle (password mode only). Sits just below the
 // input box, right-aligned. Geometry is deterministic from scrW + title so both
 // the drawing code and the touch handler can compute it identically.
@@ -85,7 +77,7 @@ static void passToggleRect(uint16_t scrW, const char* title,
     y = boxY + boxH + 4;
 }
 
-// ── Input-box / cursor helpers ────────────────────────────────────────────────
+// Input-box / cursor helpers
 // Rect of the framed input box (so taps in it can reposition the cursor).
 static void kbBoxRect(uint16_t scrW, const char* title,
                       int16_t& x, int16_t& y, int16_t& w, int16_t& h) {
@@ -419,9 +411,7 @@ static void kbFlashKey(TFT_eSPI& tft, const KeyHit& h, uint16_t fg, uint16_t bg)
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Public API
-// ─────────────────────────────────────────────────────────────────────────────
 bool touchKeyboardInput(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
                         char* buffer, size_t bufLen,
                         const char* title, bool password) {

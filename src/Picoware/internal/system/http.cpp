@@ -1,4 +1,5 @@
 #include "../../internal/system/http.hpp"
+#include "../../internal/system/certs.hpp"
 #include <ArduinoHttpClient.h>
 #if defined(ARDUINO_RASPBERRY_PI_PICO_W) || defined(ARDUINO_RASPBERRY_PI_PICO_2_W)
 #include <AsyncHTTPRequest_RP2040W.h>
@@ -13,6 +14,12 @@
 
 namespace Picoware
 {
+    HTTP::HTTP() : client()
+    {
+        // Validate server certs against the bundled CA roots (certs.hpp).
+        client.setCACert(root_ca);
+    }
+
     HTTP::~HTTP()
     {
         // nothing to do
@@ -59,12 +66,12 @@ namespace Picoware
                     {
                         response = http.getString();
                         http.end();
-                        // this->client.setCACert(root_ca);
+                        this->client.setCACert(root_ca); // re-arm cert validation
                         return response;
                     }
                     else
                     {
-                        // this->client.setCACert(root_ca);
+                        this->client.setCACert(root_ca); // re-arm cert validation
                     }
                 }
             }

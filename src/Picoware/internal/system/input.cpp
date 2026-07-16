@@ -11,7 +11,7 @@
 
 namespace Picoware
 {
-    // ── FT6336 raw read (panel-native portrait coords) ───────────────────────
+    // FT6336 raw read (panel-native portrait coords)
     static bool ft6336_read_raw(uint16_t &rx, uint16_t &ry)
     {
         uint8_t d[7];
@@ -29,7 +29,7 @@ namespace Picoware
         return true;
     }
 
-    // ── TouchInput ───────────────────────────────────────────────────────────
+    // TouchInput
     TouchInput::TouchInput(uint16_t width, uint16_t height, uint8_t rotation)
         : lastButton(-1), w(width), h(height), rot(rotation & 3),
           px(0), py(0), pressed(false), wasDown(false), lastMs(0)
@@ -98,7 +98,7 @@ namespace Picoware
         lastMs = millis();
     }
 
-    // ── Input ────────────────────────────────────────────────────────────────
+    // Input
     Input::Input()
         : pin(-1), buttonAssignment(-1), lastButton(-1), debounce(0.05f),
           startTime(0), elapsedTime(0), wasPressed(false), touch(nullptr)

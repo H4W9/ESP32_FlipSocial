@@ -18,13 +18,7 @@ namespace Picoware
     class HTTP
     {
     public:
-        HTTP() : client()
-        {
-            // No CA bundle is shipped; accept server certs without validation so
-            // HTTPS requests succeed on the ESP32 (used by the HTTP test and by
-            // FlipSocial / FlipWorld). Revisit if certificate pinning is wanted.
-            client.setInsecure();
-        }
+        HTTP(); // installs the CA bundle (certs.hpp root_ca) via setCACert
         ~HTTP();
         HTTPState getState() const noexcept { return state; } // Get the current HTTP state
         String request(
