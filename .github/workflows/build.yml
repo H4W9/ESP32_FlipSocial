@@ -83,13 +83,24 @@ jobs:
           path: TFT_eSPI-ESP32-C5
 
       # The TFT fork ships the driver, not the board User_Setup files. Copy the
-      # ones bundled in this repo into the library and point Select.h at ours.
+      # ones bundled in this repo into the library, then point the library's own
+      # User_Setup_Select.h at ours. We must EDIT that file (not overwrite it):
+      # its lower half is the driver-defines selector (#include ST7796_Defines.h,
+      # #define TFT_DRIVER ...) that supplies TFT_CASET/TFT_MADCTL/TFT_SWRST/etc.
+      # Overwriting it drops those defines and the build fails to compile.
       - name: Select TFT User_Setup for ${{ matrix.board }}
         run: |
           cp User_Setup_*.h TFT_eSPI-ESP32-C5/
-          echo "#include <${{ matrix.tft_setup }}.h>" > TFT_eSPI-ESP32-C5/User_Setup_Select.h
+          SEL=TFT_eSPI-ESP32-C5/User_Setup_Select.h
+          # Neutralise any board setup the fork ships as active, keep the rest.
+          sed -i -E 's|^[[:space:]]*#include <User_Setup|//#include <User_Setup|' "$SEL"
+          # Inject ours inside the USER_SETUP_LOADED guard, before the driver block.
+          sed -i "/#ifndef USER_SETUP_LOADED/a #include <${{ matrix.tft_setup }}.h>" "$SEL"
           ls TFT_eSPI-ESP32-C5/User_Setup_*.h
-          cat TFT_eSPI-ESP32-C5/User_Setup_Select.h
+          echo '--- active includes in User_Setup_Select.h ---'
+          grep -nE '^[[:space:]]*#include <User_Setup' "$SEL" || true
+          echo '--- driver-defines block still present? ---'
+          grep -n 'ST7796_Defines\|TFT_DRIVER 0x7796' "$SEL" || true
 
       # Arduino IDE can't inject git data — stamp the short SHA into FW_COMMIT.
       - name: Stamp commit SHA
