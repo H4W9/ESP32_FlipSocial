@@ -105,6 +105,19 @@ static size_t kbIndexAt(TFT_eSPI& tft, const char* buf, size_t viewStart, int16_
     }
     return n;
 }
+// Largest viewStart that still shows the end of the text (right-aligned to fit
+// maxW). Clamps manual swipe-scrolling so it can't run off past the last char.
+static size_t kbMaxView(TFT_eSPI& tft, const char* buf, int16_t maxW, bool mask) {
+    size_t s = strlen(buf);
+    int16_t w = 0;
+    while (s > 0) {
+        char c = mask ? '*' : buf[s - 1]; char one[2] = { c, '\0' };
+        int16_t cw = (int16_t)tft.textWidth(one, 2);
+        if (w + cw > maxW) break;
+        w += cw; s--;
+    }
+    return s;
+}
 // Insert/delete at the cursor (not just the end).
 static bool kbInsert(char* buf, size_t bufLen, size_t& cursor, char c) {
     size_t len = strlen(buf);
@@ -129,7 +142,7 @@ static void drawTextLine(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
                          uint16_t scrW, uint16_t scrH,
                          const char* title, const char* buffer,
                          size_t cursor, size_t& viewStart, size_t bufLen,
-                         bool password, bool reveal) {
+                         bool password, bool reveal, bool followCursor = true) {
     (void)scrH;
     int16_t titleH = (title && title[0]) ? 22 : 0;
     int16_t boxY = 6 + titleH, boxH = 26;
@@ -143,9 +156,12 @@ static void drawTextLine(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
     // Clear only the interior of the framed box.
     tft.fillRect(5, boxY + 1, (int16_t)scrW - 10, boxH - 2, bg);
 
-    // Horizontal scroll: keep the cursor inside the visible window.
-    if (cursor < viewStart) viewStart = cursor;
-    while (viewStart < cursor && kbSubW(tft, p, viewStart, cursor, mask) > maxW) viewStart++;
+    // Horizontal scroll. Follow mode keeps the cursor inside the visible window;
+    // manual (swipe) mode honours the caller's viewStart as-is.
+    if (followCursor) {
+        if (cursor < viewStart) viewStart = cursor;
+        while (viewStart < cursor && kbSubW(tft, p, viewStart, cursor, mask) > maxW) viewStart++;
+    }
 
     char vis[132]; size_t k = 0; int16_t w = 0;
     for (size_t i = viewStart; i < n && k < sizeof(vis) - 1; i++) {
@@ -159,10 +175,12 @@ static void drawTextLine(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
     tft.setTextDatum(TL_DATUM);
     tft.drawString(vis, tx, ty, 2);
 
-    // Caret at the cursor position.
-    int16_t caretX = tx + kbSubW(tft, p, viewStart, cursor, mask);
-    if (caretX > (int16_t)scrW - 8) caretX = (int16_t)scrW - 8;
-    tft.fillRect(caretX, ty, 2, 16, fg);
+    // Caret — only when the cursor falls within the visible window (when the text
+    // is swiped so the cursor is off-screen, no caret is shown).
+    if (cursor >= viewStart) {
+        int16_t caretX = tx + kbSubW(tft, p, viewStart, cursor, mask);
+        if (caretX <= (int16_t)scrW - 8) tft.fillRect(caretX, ty, 2, 16, fg);
+    }
 
     // Char count "used/max" in the top-right of the header row.
     char cnt[20];
@@ -455,14 +473,50 @@ bool touchKeyboardInput(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
             }
         }
 
-        // Tap inside the input box → move the cursor to that character.
+        // Input box gesture: a tap moves the cursor to that character; a horizontal
+        // swipe scrolls the text so long entries can be scrolled to any edit point.
         {
             int16_t bx, by, bw, bh; kbBoxRect(scrW, title, bx, by, bw, bh);
             if ((int16_t)tx >= bx && (int16_t)tx < bx + bw &&
                 (int16_t)ty >= by && (int16_t)ty < by + bh) {
-                cursor = kbIndexAt(tft, buffer, viewStart, (int16_t)tx - 8, password && !reveal);
-                uint16_t rx, ry; while (kb_rawTouch(tft, &rx, &ry)) { delay(8); yield(); }
-                redrawText();
+                bool    mask    = password && !reveal;
+                int16_t maxW    = (int16_t)scrW - 8 - 12;
+                size_t  maxView = kbMaxView(tft, buffer, maxW, mask);
+                int16_t downX   = (int16_t)tx, lastX = downX;
+                int16_t travel  = 0, accum = 0;
+                bool    swiping = false;
+                uint16_t rx = tx, ry = ty;
+                for (;;) {
+                    if (!kb_rawTouch(tft, &rx, &ry)) break;      // released
+                    int16_t cx = (int16_t)rx;
+                    int16_t ad = cx - downX; if (ad < 0) ad = -ad;
+                    if (ad > travel) travel = ad;
+                    if (travel > 8) swiping = true;              // past jitter → it's a swipe
+                    if (swiping) {
+                        accum += lastX - cx;                     // >0 : finger moved left
+                        while (accum > 0 && viewStart < maxView) {
+                            char c = mask ? '*' : buffer[viewStart]; char one[2] = { c, '\0' };
+                            int16_t cw = (int16_t)tft.textWidth(one, 2);
+                            if (accum < cw) break;
+                            accum -= cw; viewStart++;
+                        }
+                        while (accum < 0 && viewStart > 0) {
+                            char c = mask ? '*' : buffer[viewStart - 1]; char one[2] = { c, '\0' };
+                            int16_t cw = (int16_t)tft.textWidth(one, 2);
+                            if (-accum < cw) break;
+                            accum += cw; viewStart--;
+                        }
+                        lastX = cx;
+                        drawTextLine(tft, fg, bg, scrW, scrH, title, buffer,
+                                     cursor, viewStart, bufLen, password, reveal, false);
+                    }
+                    delay(8); yield();
+                }
+                if (!swiping) {                                  // tap → place the cursor
+                    cursor = kbIndexAt(tft, buffer, viewStart, downX - 8, mask);
+                    redrawText();
+                }
+                // A swipe leaves the manually-scrolled view in place (already drawn).
                 continue;
             }
         }
