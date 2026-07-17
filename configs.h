@@ -17,7 +17,7 @@
 // time (see .github/workflows/build.yml); it stays "dev" for local builds.
 #define FW_NAME    "FlipSocial"
 #define FW_AUTHOR  "H4W9"
-#define FW_VERSION "1.0.1"
+#define FW_VERSION "1.0.2"
 #ifndef FW_COMMIT
 #define FW_COMMIT  "dev"
 #endif
