@@ -162,8 +162,38 @@ static void applyThemeToViewManager() {
   vm->setSelectedColor(theme.sel());
 }
 
-// Status RGB LED (onboard addressable LED). Colour-coded by action:
-//   yellow = WiFi scan/connect, blue = HTTP fetch, green = success, red = error.
+// Status LED. Colour-coded by action where the hardware allows:
+//   amber = WiFi scan/connect, blue = HTTP fetch, green = success, red = error.
+// The public API (ledOff/ledWifi/ledHttp/ledOk/ledErr/ledBlinkOk/ledSet) is the
+// same for both backends; only the drive layer differs per board.
+#ifdef HAS_ACT_LED
+// V8: one blue GPIO LED (active-high). GPIO28 is a strapping pin (pull-up =
+// normal SPI boot), so it is handled exactly like the Marauder firmware does:
+// a plain digital output — no PWM/LEDC routed onto the strap pin and no pad-hold,
+// so a reset always releases it back to the pull-up and boots normally. No colour,
+// so every status maps to on/off; success is a brief blink. led_bright 0 = off,
+// keeping the Settings LED row functional (as a simple on/off, not a dimmer).
+static bool g_actLedReady = false;
+static void ledActArm() {
+  if (g_actLedReady) return;
+  pinMode(ACT_LED_PIN, OUTPUT);
+  digitalWrite(ACT_LED_PIN, LOW);
+  g_actLedReady = true;
+}
+static void ledActSet(bool on) {
+  ledActArm();
+  digitalWrite(ACT_LED_PIN, (on && theme.led_bright > 0) ? HIGH : LOW);
+}
+static inline void ledOff()  { ledActSet(false); }
+static inline void ledWifi() { ledActSet(true); }
+static inline void ledHttp() { ledActSet(true); }
+static inline void ledOk()   { ledActSet(true); }
+static inline void ledErr()  { ledActSet(true); }
+static inline void ledBlinkOk(uint16_t ms = 150) { ledActSet(true); delay(ms); ledActSet(false); }
+static void ledSet(bool on) { ledActSet(on); }
+
+#else
+// Pancake: onboard addressable RGB LED (WS2812-style).
 #ifdef RGB_BUILTIN
   #define PW_RGB_PIN RGB_BUILTIN
 #else
@@ -193,6 +223,7 @@ static inline void ledErr()  { ledRGB(255,  0,   0); } // red   — error
 static inline void ledBlinkOk(uint16_t ms = 150) { ledOk(); delay(ms); ledOff(); }
 // Back-compat shim: old on/off calls map to the WiFi (amber) colour.
 static void ledSet(bool on) { if (on) ledWifi(); else ledOff(); }
+#endif // HAS_ACT_LED
 
 // FlipSocial credentials (SPIFFS: /pico_user.json)
 static String credGet(const char *key) {
@@ -2117,6 +2148,9 @@ void setup() {
 
   // Load persisted theme/accent/font/brightness before anything draws.
   theme.load();
+
+  // Put the status LED in a known-off state (also arms the V8's PWM channel).
+  ledOff();
 
   // ViewManager owns the panel (Draw) and touch (InputManager).
 #ifdef MARAUDER_V8

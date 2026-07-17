@@ -75,6 +75,8 @@
   #define HAS_PSRAM
   #define HAS_IDF_3           // ESP32-C5 uses IDF 5.x; psramInit() handles PSRAM
   #define HAS_BATTERY         // MAX17048 fuel gauge on shared I2C bus
+  #define HAS_ACT_LED         // single blue activity LED (not an addressable RGB)
+  #define ACT_LED_PIN  28     // active-high (HIGH = on)
 
   #define TFT_WIDTH  240
   #define TFT_HEIGHT 320
