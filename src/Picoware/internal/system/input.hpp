@@ -3,9 +3,16 @@
 #include "../../internal/gui/vector.hpp"
 #include "../../internal/boards.hpp"
 #include "../../internal/system/buttons.hpp"
+class TFT_eSPI; // fwd-declared: only the resistive backend touches it
+
 namespace Picoware
 {
-    // TouchInput — FT6336 capacitive touch for the Pancake board.
+    // TouchInput — panel touch, with two backends:
+    //   * FT6336 capacitive over I2C (Pancake) — the default.
+    //   * XPT2046 resistive via TFT_eSPI::getTouch() (Marauder V8) — selected by
+    //     calling attachTFT(); getTouch() already returns calibrated, rotated
+    //     screen coords, so no mapping is done for it here.
+    // Branching on the attached pointer keeps this file board-agnostic.
     //
     // Produces two things each run():
     //   * lastButton: a BUTTON_* code derived from screen tap-zones so Picoware's
@@ -22,6 +29,9 @@ namespace Picoware
         TouchInput(uint16_t width, uint16_t height, uint8_t rotation);
         void run();                 // poll the panel, update lastButton / point
         void reset();               // clear state + debounce window
+        // Switch to the resistive backend (XPT2046 read through TFT_eSPI).
+        // Leave unset for FT6336 capacitive.
+        void attachTFT(TFT_eSPI *t) noexcept { tft = t; }
         bool isPressed() const noexcept { return pressed; }
         uint16_t x() const noexcept { return px; }
         uint16_t y() const noexcept { return py; }
@@ -31,6 +41,7 @@ namespace Picoware
 
     private:
         bool readPanel(uint16_t &sx, uint16_t &sy); // raw read + rotation map
+        TFT_eSPI *tft = nullptr;                    // set => resistive backend
         uint16_t w, h;
         uint8_t rot;
         uint16_t px, py;

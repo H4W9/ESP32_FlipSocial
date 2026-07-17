@@ -8,7 +8,8 @@ namespace Picoware
         BOARD_TYPE_PICO_CALC = 0,
         BOARD_TYPE_VGM = 1,
         BOARD_TYPE_JBLANKED = 2,
-        BOARD_TYPE_PANCAKE = 3, // ESP32-C5, ST7796 320×480, FT6336 cap touch
+        BOARD_TYPE_PANCAKE = 3,     // ESP32-C5, ST7796 320×480, FT6336 cap touch
+        BOARD_TYPE_MARAUDER_V8 = 4, // ESP32-C5, ILI9341 240×320, XPT2046 resistive
     } BoardType;
 
     typedef enum
@@ -189,6 +190,28 @@ namespace Picoware
         .height = 480,
         .rotation = 0,
         .name = "Pancake",
+        .hasWiFi = true,
+        .hasBluetooth = true,
+        .hasSDCard = true,
+        .hasBattery = true};
+
+    // Marauder V8 — same ESP32-C5 shell as the Pancake, smaller ILI9341 panel and
+    // XPT2046 resistive touch (the sketch calls TouchInput::attachTFT for it).
+    static const PROGMEM Board MarauderV8Config = {
+        .boardType = BOARD_TYPE_MARAUDER_V8,
+        .picoType = PICO_TYPE_PICO_W,
+        .libraryType = LIBRARY_TYPE_TFT,
+        .pins = {
+            .sck = 0,
+            .mosi = 0,
+            .miso = 0,
+            .cs = 0,
+            .dc = 0,
+            .rst = 0},
+        .width = 240,
+        .height = 320,
+        .rotation = 0,
+        .name = "Marauder V8",
         .hasWiFi = true,
         .hasBluetooth = true,
         .hasSDCard = true,

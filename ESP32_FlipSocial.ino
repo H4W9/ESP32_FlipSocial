@@ -57,13 +57,24 @@ static Theme        theme;             // colour theme + accent + font + brightn
 #define COL_SEL    (theme.sel())
 static const uint16_t COL_OK = 0x07E0;   // status green (theme-independent)
 
-static const int SCRW = 320;
-static const int SCRH = 480;
+// Panel size comes from the board block in configs.h. Rotation is left at the
+// power-on default (0 = portrait), so these map straight onto the panel:
+// Pancake ST7796 = 320x480, V8 ILI9341 = 240x320. The layout below is derived
+// from these, so it reflows per board.
+static const int SCRW = TFT_WIDTH;
+static const int SCRH = TFT_HEIGHT;
 
 // Shell layout — matches H4W9 (header 28, nav 28, list rows 34).
 static const int HDRH     = 28;
 static const int NAVH     = 28;
+// The settings list is drawn at fixed offsets and does not scroll, so the rows
+// have to fit the panel: at 34 px they run off the bottom of the V8's 320 px
+// screen. 26 px still clears the 22 px chips and the 16 px font.
+#ifdef MARAUDER_V8
+static const int ITEMH    = 26;
+#else
 static const int ITEMH    = 34;
+#endif
 static const int CONTENTY = HDRH;
 
 // FlipSocial message + viewer result (defined here so Arduino's auto-generated
@@ -72,6 +83,49 @@ struct FSMsg { uint32_t id; String user, msg, date; int flips, comments; bool fl
 struct FSProfile { String bio, joined; int friends; bool ok; };
 enum FSVResult { FSV_BACK, FSV_PREV, FSV_NEXT };
 enum FSCred { FSC_OK, FSC_NOUSER, FSC_BADPASS, FSC_EMPTY, FSC_ERR };
+
+#ifndef HAS_CAP_TOUCH
+// Resistive touch calibration (V8). Capacitive panels report real coordinates
+// and need none of this. The 5 uint16 blob is TFT_eSPI's own format; it lives on
+// SPIFFS next to the other settings.
+static const char *TOUCH_CAL_FILE = "/pico_touch.dat";
+
+static bool touchCalLoad(uint16_t *cal) {
+  File f = SPIFFS.open(TOUCH_CAL_FILE, "r");
+  if (!f) return false;
+  bool ok = (f.read((uint8_t *)cal, sizeof(uint16_t) * 5) == sizeof(uint16_t) * 5);
+  f.close();
+  return ok;
+}
+static void touchCalSave(const uint16_t *cal) {
+  File f = SPIFFS.open(TOUCH_CAL_FILE, "w");
+  if (!f) return;
+  f.write((const uint8_t *)cal, sizeof(uint16_t) * 5);
+  f.close();
+}
+// TFT_eSPI's 4-corner wizard. Blocking, and deliberately drawn without the theme
+// so it is legible before anything else is up.
+static void touchCalRun() {
+  uint16_t cal[5];
+  tft->fillScreen(TFT_BLACK);
+  tft->setTextColor(TFT_WHITE, TFT_BLACK);
+  tft->setTextDatum(MC_DATUM);
+  tft->drawString("Touch Calibration", SCRW / 2, SCRH / 2 - 24, 4);
+  tft->drawString("Tap each corner arrow", SCRW / 2, SCRH / 2 + 6, 2);
+  tft->setTextDatum(TL_DATUM);
+  delay(1500);
+  tft->fillScreen(TFT_BLACK);
+  tft->calibrateTouch(cal, TFT_MAGENTA, TFT_BLACK, 15);
+  tft->setTouch(cal);
+  touchCalSave(cal);
+}
+// Load the stored calibration, or run the wizard once on first boot.
+static void touchCalInit() {
+  uint16_t cal[5];
+  if (touchCalLoad(cal)) tft->setTouch(cal);
+  else                   touchCalRun();
+}
+#endif // !HAS_CAP_TOUCH
 
 // Touch helpers
 // Wait for a fresh tap (press edge) and return its point; blocks.
@@ -846,7 +900,13 @@ static void wifiDebug() {
 }
 
 // Settings (H4W9 layout: highlight on tap, partial redraw, no flash)
-static const int SET_N = 10;  // Theme, Accent, Font Color, Brightness, LED, WiFi, Debug, User, Pass, About
+// Theme, Accent, Font Color, Brightness, LED, WiFi, Debug, User, Pass, About
+// (+ Calibrate Touch on resistive panels — capacitive needs no calibration).
+#ifdef HAS_CAP_TOUCH
+static const int SET_N = 10;
+#else
+static const int SET_N = 11;
+#endif
 // Value string for the chip rows that need it for hit-testing.
 static String setChipVal(int row) {
   switch (row) {
@@ -873,6 +933,9 @@ static void drawSettingRow(int row, int sel) {
     case 7: drawInfoRow(y, "Username",   credGet("user"), s); break;
     case 8: drawInfoRow(y, "Password",   credGet("pass").length() ? String("****") : String(""), s); break;
     case 9: drawInfoRow(y, "About",      "", s); break;
+#ifndef HAS_CAP_TOUCH
+    case 10: drawInfoRow(y, "Calibrate Touch", "", s); break;
+#endif
   }
 }
 
@@ -969,6 +1032,9 @@ static void settingsFlow() {
                   credSet("pass", String(b));
                 full(); } break;
       case 9: aboutScreen(); full(); break;
+#ifndef HAS_CAP_TOUCH
+      case 10: touchCalRun(); full(); break;   // resistive drifts — allow a redo
+#endif
       default: break;
     }
   }
@@ -1986,7 +2052,7 @@ void setup() {
   Serial.begin(115200);
   uint32_t t0 = millis();
   while (!Serial && (millis() - t0) < 1500) delay(10);
-  Serial.println(F("[Pancake] FlipSocial starting..."));
+  Serial.println(F("[" BOARD_NAME "] FlipSocial starting..."));
 
   // Backlight off during init (PWM).
   pinMode(TFT_BL, OUTPUT);
@@ -2003,35 +2069,53 @@ void setup() {
 #ifdef HAS_C5_SD
   sharedSPI.begin(SD_SCK, SD_MISO, SD_MOSI);
   delay(100);
-  if (!SD.begin(SD_CS, sharedSPI)) Serial.println(F("[Pancake] SD init failed"));
-  else Serial.println(F("[Pancake] SD OK"));
+  if (!SD.begin(SD_CS, sharedSPI)) Serial.println(F("[" BOARD_NAME "] SD init failed"));
+  else Serial.println(F("[" BOARD_NAME "] SD OK"));
 #else
-  if (!SD.begin(SD_CS)) Serial.println(F("[Pancake] SD init failed"));
+  if (!SD.begin(SD_CS)) Serial.println(F("[" BOARD_NAME "] SD init failed"));
 #endif
 
   // SPIFFS for settings + credentials (format on first boot).
-  if (!SPIFFS.begin(true)) Serial.println(F("[Pancake] SPIFFS mount failed"));
-  else                     Serial.println(F("[Pancake] SPIFFS OK"));
+  if (!SPIFFS.begin(true)) Serial.println(F("[" BOARD_NAME "] SPIFFS mount failed"));
+  else                     Serial.println(F("[" BOARD_NAME "] SPIFFS OK"));
 
 #ifdef HAS_PSRAM
-  if (!psramInit()) Serial.println(F("[Pancake] PSRAM unavailable"));
+  if (!psramInit()) Serial.println(F("[" BOARD_NAME "] PSRAM unavailable"));
 #endif
 
+#ifdef HAS_CAP_TOUCH
   // Capacitive touch (also does Wire.begin on the shared I2C bus).
   ft6336_init();
+#else
+  // V8 has no I2C touch controller (XPT2046 rides the SPI bus), but the fuel
+  // gauge below still needs the I2C bus that ft6336_init() would have opened.
+  Wire.begin(I2C_SDA, I2C_SCL, 400000U);
+#endif
   battInit();                          // MAX17048 fuel gauge on the same I2C bus
 
   // Load persisted theme/accent/font/brightness before anything draws.
   theme.load();
 
   // ViewManager owns the panel (Draw) and touch (InputManager).
+#ifdef MARAUDER_V8
+  vm    = new ViewManager(MarauderV8Config);
+#else
   vm    = new ViewManager(PancakeConfig);
+#endif
   tft   = vm->getDraw()->display->getTFT();
   touch = vm->getInputManager()->getTouch();
   applyThemeToViewManager();
 
   // Backlight on at the saved brightness.
   applyBrightness();
+
+#ifndef HAS_CAP_TOUCH
+  // Resistive panel: point TouchInput at TFT_eSPI's XPT2046 reader, then load
+  // the stored calibration (or run the wizard). Must come after the backlight is
+  // up, or a first-boot user would be tapping an unlit screen.
+  if (touch) touch->attachTFT(tft);
+  touchCalInit();
+#endif
 
   // WiFi: capture disconnect reasons for diagnostics.
   WiFi.onEvent(wifiEvent);
@@ -2044,7 +2128,7 @@ void setup() {
   wifiBgBegin();
   drawHeaderStatus();                  // show the "connecting" (yellow) icon at once
 
-  Serial.println(F("[Pancake] Ready."));
+  Serial.println(F("[" BOARD_NAME "] Ready."));
 }
 
 void loop() {
