@@ -1511,7 +1511,8 @@ static FSVResult fsViewer(FSMsg *arr, int n, const String &title, int mode, uint
 static int fsCommentsScreen(uint32_t postId);   // returns # comments added
 
 static void fsActionPopup(FSMsg &m) {
-  int bw = 264, bh = 252, bx = (SCRW - bw) / 2, by = (SCRH - bh) / 2;
+  // Cap the width to the panel — the 264 px design overflows the V8's 240 px.
+  int bw = min(264, SCRW - 24), bh = 252, bx = (SCRW - bw) / 2, by = (SCRH - bh) / 2;
   int byy = by + 44, bhh = 44, gap = 8;
   for (;;) {
     const char *labels[4] = { m.flipped ? "Unflip" : "Flip", "View Comments", "Add Comment", "Close" };
@@ -1772,7 +1773,8 @@ static bool fsReady() {
 
 // Modal yes/no confirmation (theme + font colours). Returns true on OK.
 static bool confirmDialog(const String &title, const String &sub) {
-  int bw = 260, bh = 150, bx = (SCRW - bw) / 2, by = (SCRH - bh) / 2;
+  // Cap the width to the panel — the 260 px design overflows the V8's 240 px.
+  int bw = min(260, SCRW - 24), bh = 150, bx = (SCRW - bw) / 2, by = (SCRH - bh) / 2;
   tft->fillRoundRect(bx, by, bw, bh, 10, COL_ACCENT);
   tft->drawRoundRect(bx, by, bw, bh, 10, theme.neon(2, COL_SEL));
   tft->setTextColor(COL_FG, COL_ACCENT);
