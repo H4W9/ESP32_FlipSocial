@@ -1011,11 +1011,13 @@ static void aboutScreen() {
   row("MCU",     BOARD_MCU);
   row("Display", BOARD_DISPLAY);
   row("Touch",   BOARD_TOUCH);
-#ifdef HAS_PSRAM
-  row("PSRAM",   "Yes");
-#else
-  row("PSRAM",   "None");
-#endif
+  // Actual PSRAM size (0 if absent or init failed), rounded to whole MB.
+  {
+    size_t ps = ESP.getPsramSize();
+    if (ps >= 1024 * 1024)  row("PSRAM", String((unsigned)((ps + 512 * 1024) / (1024 * 1024))) + " MB");
+    else if (ps > 0)        row("PSRAM", String((unsigned)(ps / 1024)) + " KB");
+    else                    row("PSRAM", "None");
+  }
   row("Built",   __DATE__);
   row("Commit",  FW_COMMIT);
 
@@ -1546,7 +1548,7 @@ static void fsActionPopup(FSMsg &m) {
   int bw = min(264, SCRW - 24), bh = 252, bx = (SCRW - bw) / 2, by = (SCRH - bh) / 2;
   int byy = by + 44, bhh = 44, gap = 8;
   for (;;) {
-    const char *labels[4] = { m.flipped ? "Unflip" : "Flip", "View Comments", "Add Comment", "Close" };
+    const char *labels[4] = { m.flipped ? "Unflip" : "Flip", "View Comments", "Comment", "Close" };
     tft->fillRoundRect(bx, by, bw, bh, 10, COL_ACCENT);
     tft->drawRoundRect(bx, by, bw, bh, 10, theme.neon(2, COL_SEL));
     tft->setTextColor(COL_FG, COL_ACCENT);
@@ -1576,7 +1578,7 @@ static void fsActionPopup(FSMsg &m) {
 
 // Smooth-scrolling message viewer (feed or comments) with momentum + footer.
 // FEED footer: [< Prev][+ New Post][Next >] -> returns FSV_PREV / FSV_NEXT / FSV_BACK.
-// COMMENTS footer: [+ Add Comment]          -> returns FSV_BACK.
+// COMMENTS footer: [Comment]                -> returns FSV_BACK.
 static FSVResult fsViewer(FSMsg *arr, int n, const String &title, int mode, uint32_t ctxPost, int series) {
   const int SPR_H = SCRH - HDRH - NAVH;
   int top[FS_MAX], hh[FS_MAX], total;
@@ -1598,9 +1600,9 @@ static FSVResult fsViewer(FSMsg *arr, int n, const String &title, int mode, uint
   }
 
   auto footer = [&]() {
-    if (mode == FS_FEED)          drawNav("< Prev", "+ New Post", "Next >");
-    else if (mode == FS_COMMENTS) drawNav("", "+ Add Comment", "");
-    else if (mode == FS_MESSAGES) drawNav("< Prev", "+ Send", "Next >");
+    if (mode == FS_FEED)          drawNav("< Prev", "New Post", "Next >");
+    else if (mode == FS_COMMENTS) drawNav("", "Comment", "");
+    else if (mode == FS_MESSAGES) drawNav("< Prev", "Send", "Next >");
     else                          drawNav("< Prev", "", "Next >");   // My Posts: page-only
   };
 
@@ -1755,7 +1757,7 @@ static FSVResult messagesThreadScreen(const String &peer) {
   return fsViewer(msgs, n, String("@") + peer + (g_usingCache ? "  [offline]" : ""), FS_MESSAGES, 0, 0);
 }
 
-// Messages — conversation list with a [Back][+ New Msg] footer. Tap a user to open
+// Messages — conversation list with a [Back][New Msg] footer. Tap a user to open
 // the thread; Prev/Next in the thread page through the conversation list.
 static void messagesScreen() {
   static String users[40];
@@ -1764,7 +1766,7 @@ static void messagesScreen() {
     tft->setTextColor(COL_DIM, COL_BG); tft->setTextDatum(MC_DATUM);
     tft->drawString("Loading...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
     int n = fsLoadMsgUsers(users, 40);
-    int sel = scrollList(g_usingCache ? "Messages [offline]" : "Messages", users, n, true, "Back", "+ New Msg", "");
+    int sel = scrollList(g_usingCache ? "Messages [offline]" : "Messages", users, n, true, "Back", "New Msg", "");
     if (sel == SL_BACK || sel == SL_F0) return;
     if (sel == SL_F1) {                                // start a new conversation
       char b[64] = {0};
@@ -1997,7 +1999,7 @@ static void exploreScreen() {
     tft->setTextColor(COL_DIM, COL_BG); tft->setTextDatum(MC_DATUM);
     tft->drawString("Searching...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
     int n = fsExplore(String(kw), users, 40);
-    int sel = scrollList(String("Explore: ") + kw, users, n, true, "Back", "+ Search", "");
+    int sel = scrollList(String("Explore: ") + kw, users, n, true, "Back", "Search", "");
     if (sel == SL_BACK || sel == SL_F0) return;
     if (sel == SL_F1) {                                // new search
       kw[0] = 0;
