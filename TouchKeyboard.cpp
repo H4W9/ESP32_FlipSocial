@@ -226,6 +226,24 @@ static void drawTextArea(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
     drawTextLine(tft, fg, bg, scrW, scrH, title, buffer, cursor, viewStart, bufLen, password, reveal);
 }
 
+// Key identity for the control row + press feedback.
+enum KeyKind { KK_NONE, KK_CHAR, KK_CAPS, KK_CANCEL, KK_LAYOUT, KK_SPACE, KK_BKSP, KK_OK };
+
+// Control row (row 4) geometry. SPACE is 4 cells wide and centered; the four
+// surrounding keys (CANCEL, SYM, BKSP, OK) are each 1.5 cells. Widening the side
+// keys pushes OK and BKSP apart so an OK meant as backspace is far less likely.
+// drawKeyboard and kbHit both derive their layout from here so they stay in sync.
+struct CtrlKey { KeyKind kind; int16_t x, w; };
+static const int KB_CTRL_N = 5;
+static void kbCtrlKeys(int16_t cW, CtrlKey out[KB_CTRL_N]) {
+    int16_t hw = cW / 2;                                   // half a cell
+    out[0] = { KK_CANCEL, 0,                    (int16_t)(cW + hw) };
+    out[1] = { KK_LAYOUT, (int16_t)(cW + hw),   (int16_t)(cW + hw) };
+    out[2] = { KK_SPACE,  (int16_t)(3 * cW),    (int16_t)(4 * cW) };
+    out[3] = { KK_BKSP,   (int16_t)(7 * cW),    (int16_t)(cW + hw) };
+    out[4] = { KK_OK,     (int16_t)(8 * cW + hw), (int16_t)(cW + hw) };
+}
+
 // upper = render letters uppercase; capsMode = CAPS key look (0 off, 1 shift-once, 2 lock).
 static void drawKeyboard(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
                          uint16_t scrW, uint16_t scrH,
@@ -283,30 +301,32 @@ static void drawKeyboard(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
         }
     }
 
-    // Row 4: control row
+    // Row 4: control row (SPACE narrowed to 4 cells; side keys widened to 1.5).
     int16_t rowY  = kY + 4 * cH;
     int16_t ctrlY = rowY + (cH - 16) / 2;
+    CtrlKey ck[KB_CTRL_N];
+    kbCtrlKeys(cW, ck);
 
-    // Col 0: CANCEL
-    tft.drawRect(0, rowY, cW, cH, bdr);
+    // CANCEL
+    tft.drawRect(ck[0].x, rowY, ck[0].w, cH, bdr);
     tft.setTextColor(TFT_RED, key_bg);
-    tft.drawCentreString("X", cW / 2, ctrlY, 2);
+    tft.drawCentreString("X", ck[0].x + ck[0].w / 2, ctrlY, 2);
 
-    // Col 1: SYM / ABC toggle
-    tft.drawRect(cW, rowY, cW, cH, bdr);
+    // SYM / ABC toggle
+    tft.drawRect(ck[1].x, rowY, ck[1].w, cH, bdr);
     tft.setTextColor(key_fg, key_bg);
-    tft.drawCentreString(layout == KB_ALPHA ? "SYM" : "ABC", cW + cW / 2, ctrlY, 2);
+    tft.drawCentreString(layout == KB_ALPHA ? "SYM" : "ABC", ck[1].x + ck[1].w / 2, ctrlY, 2);
 
-    // Cols 2-7: SPACE
-    tft.fillRect(2 * cW, rowY, 6 * cW, cH, key_bg);
-    tft.drawRect(2 * cW, rowY, 6 * cW, cH, bdr);
+    // SPACE
+    tft.fillRect(ck[2].x, rowY, ck[2].w, cH, key_bg);
+    tft.drawRect(ck[2].x, rowY, ck[2].w, cH, bdr);
     tft.setTextColor(key_fg, key_bg);
-    tft.drawCentreString("SPACE", 5 * cW, ctrlY, 2);
+    tft.drawCentreString("SPACE", ck[2].x + ck[2].w / 2, ctrlY, 2);
 
-    // Col 8: BKSP (left-arrow glyph)
-    tft.drawRect(8 * cW, rowY, cW, cH, bdr);
+    // BKSP (left-arrow glyph)
+    tft.drawRect(ck[3].x, rowY, ck[3].w, cH, bdr);
     {
-        int16_t ax = 8 * cW + cW / 2 - 5;
+        int16_t ax = ck[3].x + ck[3].w / 2 - 5;
         int16_t ay = rowY + cH / 2;
         tft.fillRect(ax + 3, ay - 3, 1, 1, key_fg);
         tft.fillRect(ax + 2, ay - 2, 2, 1, key_fg);
@@ -318,17 +338,16 @@ static void drawKeyboard(TFT_eSPI& tft, uint16_t fg, uint16_t bg,
         tft.fillRect(ax + 4, ay + 0, 6, 1, key_fg);
     }
 
-    // Col 9: OK
-    tft.fillRect(9 * cW, rowY, cW, cH, (uint16_t)0x07E0);
-    tft.drawRect(9 * cW, rowY, cW, cH, bdr);
+    // OK
+    tft.fillRect(ck[4].x, rowY, ck[4].w, cH, (uint16_t)0x07E0);
+    tft.drawRect(ck[4].x, rowY, ck[4].w, cH, bdr);
     tft.setTextColor((uint16_t)TFT_BLACK, (uint16_t)0x07E0);
-    tft.drawCentreString("OK", 9 * cW + cW / 2, ctrlY, 2);
+    tft.drawCentreString("OK", ck[4].x + ck[4].w / 2, ctrlY, 2);
 }
 
 
 // Unified hit-test: which key is under (tx,ty), its on-screen rect, and (for a
 // character key) the resulting char given `upper`. Geometry matches drawKeyboard.
-enum KeyKind { KK_NONE, KK_CHAR, KK_CAPS, KK_CANCEL, KK_LAYOUT, KK_SPACE, KK_BKSP, KK_OK };
 struct KeyHit { KeyKind kind; int16_t kx, ky, kw, kh; char ch; };
 
 static KeyHit kbHit(uint16_t tx, uint16_t ty, uint16_t scrW, uint16_t scrH,
@@ -369,17 +388,14 @@ static KeyHit kbHit(uint16_t tx, uint16_t ty, uint16_t scrW, uint16_t scrH,
         return h;
     }
 
-    // Control row 4
-    int col = (int16_t)tx / cW;
+    // Control row 4 — same geometry as drawKeyboard (SPACE 4 cells, sides 1.5).
     h.ky = rowY; h.kh = cH;
-    switch (col) {
-        case 0: h.kind = KK_CANCEL; h.kx = 0;       h.kw = cW;     break;
-        case 1: h.kind = KK_LAYOUT; h.kx = cW;      h.kw = cW;     break;
-        case 2: case 3: case 4: case 5: case 6: case 7:
-                h.kind = KK_SPACE;  h.kx = 2 * cW;  h.kw = 6 * cW; break;
-        case 8: h.kind = KK_BKSP;   h.kx = 8 * cW;  h.kw = cW;     break;
-        case 9: h.kind = KK_OK;     h.kx = 9 * cW;  h.kw = cW;     break;
-        default: break;
+    CtrlKey ck[KB_CTRL_N];
+    kbCtrlKeys(cW, ck);
+    for (int i = 0; i < KB_CTRL_N; i++) {
+        if ((int16_t)tx >= ck[i].x && (int16_t)tx < ck[i].x + ck[i].w) {
+            h.kind = ck[i].kind; h.kx = ck[i].x; h.kw = ck[i].w; break;
+        }
     }
     return h;
 }

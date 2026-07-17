@@ -943,23 +943,38 @@ static void drawSettingRow(int row, int sel) {
 static void aboutScreen() {
   tft->fillScreen(COL_BG);
   drawHeader("About", true);
+
+  // Compact spacing so the whole page fits above the "tap to go back" line on the
+  // shorter V8 panel (240x320); the Pancake keeps its original roomier layout.
+#ifdef MARAUDER_V8
+  const int dName = 26, dSub = 17, dAuth = 18, dRule = 6, dRow = 17, dGap = 2, dRule2 = 6, dCred = 16;
+  const int valX = 82;   // value column; keeps "XPT2046 resistive" inside 240 px
+  const char *credit1 = "App & API by JBlanked";
+  const char *credit2 = "Picoware engine";
+#else
+  const int dName = 32, dSub = 22, dAuth = 24, dRule = 10, dRow = 21, dGap = 4, dRule2 = 8, dCred = 20;
+  const int valX = 110;
+  const char *credit1 = "FlipSocial app & API by JBlanked";
+  const char *credit2 = "jblanked.com/flipper  -  Picoware";
+#endif
+
   int cx = SCRW / 2, y = CONTENTY + 12;
 
   // Name + version + author (centred, prominent).
   tft->setTextColor(COL_FG, COL_BG);
   tft->setTextDatum(MC_DATUM);
-  tft->drawString(FW_NAME, cx, y, 4); y += 32;
-  tft->drawString(String("Version ") + FW_VERSION, cx, y, 2); y += 22;
+  tft->drawString(FW_NAME, cx, y, 4); y += dName;
+  tft->drawString(String("Version ") + FW_VERSION, cx, y, 2); y += dSub;
   tft->setTextColor(COL_DIM, COL_BG);
-  tft->drawString("by " FW_AUTHOR, cx, y, 2); y += 24;
-  tft->drawFastHLine(16, y, SCRW - 32, theme.neon(1, theme.edge())); y += 10;
+  tft->drawString("by " FW_AUTHOR, cx, y, 2); y += dAuth;
+  tft->drawFastHLine(16, y, SCRW - 32, theme.neon(1, theme.edge())); y += dRule;
 
   // Label : value detail rows.
   tft->setTextDatum(TL_DATUM);
   auto row = [&](const char *label, const String &value) {
     tft->setTextColor(COL_DIM, COL_BG); tft->drawString(label, 16, y, 2);
-    tft->setTextColor(COL_FG, COL_BG);  tft->drawString(value, 110, y, 2);
-    y += 21;
+    tft->setTextColor(COL_FG, COL_BG);  tft->drawString(value, valX, y, 2);
+    y += dRow;
   };
   row("Board",   BOARD_NAME);
   row("MCU",     BOARD_MCU);
@@ -973,11 +988,11 @@ static void aboutScreen() {
   row("Built",   __DATE__);
   row("Commit",  FW_COMMIT);
 
-  y += 4;
-  tft->drawFastHLine(16, y, SCRW - 32, theme.neon(2, theme.edge())); y += 8;
+  y += dGap;
+  tft->drawFastHLine(16, y, SCRW - 32, theme.neon(2, theme.edge())); y += dRule2;
   tft->setTextColor(COL_DIM, COL_BG);
-  tft->drawString("FlipSocial app & API by JBlanked", 16, y, 2); y += 20;
-  tft->drawString("jblanked.com/flipper  -  Picoware", 16, y, 2);
+  tft->drawString(credit1, 16, y, 2); y += dCred;
+  tft->drawString(credit2, 16, y, 2);
 
   statusLine("Tap to go back.", COL_DIM);
   uint16_t x, ty; waitTap(x, ty);
@@ -1992,7 +2007,12 @@ static void drawMenu() {
     tft->drawRoundRect(MENU_MARGIN, y, SCRW - 2 * MENU_MARGIN, bh, 12, theme.neon(i * 3, COL_DIM));
     tft->setTextColor(COL_FG, COL_ACCENT);
     tft->setTextDatum(MC_DATUM);
+    // V8's buttons are ~34 px tall — font 4 (26 px) crowds them, so use font 2.
+#ifdef MARAUDER_V8
+    tft->drawString(MENU_ITEMS[i], SCRW / 2, y + bh / 2, 2);
+#else
     tft->drawString(MENU_ITEMS[i], SCRW / 2, y + bh / 2, 4);
+#endif
   }
   tft->setTextDatum(TL_DATUM);
 }
