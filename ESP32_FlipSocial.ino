@@ -49,6 +49,17 @@ static TFT_eSPI    *tft   = nullptr;   // raw panel (from Draw) for the shell sc
 static TouchInput  *touch = nullptr;   // FT6336 touch source (from InputManager)
 static Theme        theme;             // colour theme + accent + font + brightness
 
+// New-message state. The API exposes no unread flag, so "new" means a
+// conversation's contents changed since we last opened it (see fsScanNewMsgs).
+static const uint16_t COL_MAIL = 0x07FF;   // cyan — envelope badge
+static bool   g_hasNewMsg = false;         // drives the header envelope
+static String g_newPeers[12];              // peers with unseen messages (row badges)
+static int    g_newPeerN = 0;
+static bool fsPeerHasNew(const String &peer) {
+  for (int i = 0; i < g_newPeerN; i++) if (g_newPeers[i] == peer) return true;
+  return false;
+}
+
 // Theme-driven colours (macros so every use follows the current theme).
 #define COL_BG     (theme.bg())
 #define COL_FG     (theme.fg())
@@ -348,11 +359,24 @@ static void wifiArc(int cx, int cy, int r, uint16_t c) {
   }
 }
 
+// Envelope badge: body rect + the two flap diagonals. Templated because
+// TFT_eSprite's drawing methods are not virtual, so this binds the right
+// overload at compile time for both the panel and a sprite.
+template <typename G>
+static void drawEnvelope(G &g, int x, int y, int w, int h, uint16_t col) {
+  g.drawRect(x, y, w, h, col);
+  g.drawLine(x + 1,     y + 1, x + w / 2, y + h / 2, col);
+  g.drawLine(x + w - 2, y + 1, x + w / 2, y + h / 2, col);
+}
+
 // Battery % (right edge) + WiFi state icon, painted into the header's top-right.
 // Self-clearing, so it can also be called on its own for a periodic refresh.
 static void drawHeaderStatus() {
   if (g_battOk && (g_battMs == 0 || millis() - g_battMs > 10000)) battUpdate();
-  tft->fillRect(SCRW - 62, 0, 62, HDRH, COL_ACCENT);   // clear the status corner
+  // Only widen the cleared corner when the envelope is showing, so titles keep
+  // their full width the rest of the time (matters on the narrow V8 header).
+  int clearW = g_hasNewMsg ? 80 : 62;
+  tft->fillRect(SCRW - clearW, 0, clearW, HDRH, COL_ACCENT);   // clear the status corner
 
   int rx = SCRW - 4;                                   // right edge for battery text
   if (g_battPct >= 0) {
@@ -373,6 +397,11 @@ static void drawHeaderStatus() {
   wifiArc(cx, cy, 4,  wc);
   wifiArc(cx, cy, 7,  wc);
   wifiArc(cx, cy, 10, wc);
+
+  // Cyan envelope, just left of the WiFi fan, only while a conversation has
+  // unseen messages.
+  if (g_hasNewMsg) drawEnvelope(*tft, cx - 10 - 4 - 12, HDRH / 2 - 4, 12, 9, COL_MAIL);
+
   tft->setTextDatum(TL_DATUM);
 }
 
@@ -434,13 +463,14 @@ static int navHit(uint16_t x, uint16_t y) {
 
 // One list row: fill, left text, optional right chevron, divider. Divider/chevron
 // follow the theme (neon rainbow on the Neon theme, else edge/dim).
-static void drawListRow(int y, const String &text, bool sel, bool arrow) {
+static void drawListRow(int y, const String &text, bool sel, bool arrow, bool badge = false) {
   uint16_t bgc = sel ? COL_SEL : COL_BG;
   int seed = y / ITEMH;
   tft->fillRect(0, y, SCRW, ITEMH, bgc);
   tft->setTextColor(COL_FG, bgc);
   tft->setTextDatum(ML_DATUM);
   tft->drawString(text, 12, y + ITEMH / 2, 2);
+  if (badge) drawEnvelope(*tft, SCRW - 46, y + ITEMH / 2 - 4, 12, 9, COL_MAIL);
   if (arrow) drawChevron(SCRW - 26, y, 16, ITEMH, true, theme.neon(seed, COL_DIM));
   tft->drawFastHLine(0, y + ITEMH - 1, SCRW, theme.neon(seed, theme.edge()));
   tft->setTextDatum(TL_DATUM);
@@ -448,11 +478,13 @@ static void drawListRow(int y, const String &text, bool sel, bool arrow) {
 
 // Sprite version of a list row (for flicker-free momentum scrolling). `seed` is
 // the row index, used to vary the neon hue down the list.
-static void drawRowSprite(TFT_eSprite &spr, int y, const String &text, bool arrow, int seed) {
+static void drawRowSprite(TFT_eSprite &spr, int y, const String &text, bool arrow, int seed,
+                          bool badge = false) {
   spr.fillRect(0, y, SCRW, ITEMH, COL_BG);
   spr.setTextColor(COL_FG, COL_BG);
   spr.setTextDatum(ML_DATUM);
   spr.drawString(text, 12, y + ITEMH / 2, 2);
+  if (badge) drawEnvelope(spr, SCRW - 46, y + ITEMH / 2 - 4, 12, 9, COL_MAIL);
   if (arrow) {
     int cx = SCRW - 26 + 8, cy = y + ITEMH / 2;
     spr.fillTriangle(cx - 3, cy - 5, cx - 3, cy + 5, cx + 4, cy, theme.neon(seed, COL_DIM));
@@ -481,8 +513,10 @@ static const int SL_BACK = -1, SL_F0 = -2, SL_F1 = -3, SL_F2 = -4;
 // Momentum-scrolling list of string rows with a right-edge scrollbar. Optional
 // footer nav bar (pass labels): a footer tap returns SL_F0/SL_F1/SL_F2, Back
 // returns SL_BACK, and a row tap returns its index.
+// `badge` (optional, parallel to `rows`) marks rows that get the cyan envelope.
 static int scrollList(const String &title, String *rows, int n, bool arrow,
-                      const char *fL = nullptr, const char *fM = nullptr, const char *fR = nullptr) {
+                      const char *fL = nullptr, const char *fM = nullptr, const char *fR = nullptr,
+                      const bool *badge = nullptr) {
   bool hasFooter = (fL && fL[0]) || (fM && fM[0]) || (fR && fR[0]);
   const int CY = CONTENTY;
   const int CH = SCRH - CONTENTY - (hasFooter ? NAVH : 0);
@@ -510,7 +544,7 @@ static int scrollList(const String &title, String *rows, int n, bool arrow,
       for (int i = 0; i < n; i++) {
         int y = i * ITEMH - (int)scroll;
         if (y + ITEMH < 0 || y > CH) continue;
-        drawRowSprite(spr, y, rows[i], arrow, i);
+        drawRowSprite(spr, y, rows[i], arrow, i, badge && badge[i]);
       }
       sprScrollBar(spr, CH, total, scroll);
       spr.pushSprite(0, CY);
@@ -519,7 +553,7 @@ static int scrollList(const String &title, String *rows, int n, bool arrow,
       for (int i = 0; i < n; i++) {
         int y = i * ITEMH - (int)scroll;
         if (y + ITEMH < 0 || y > CH) continue;
-        drawListRow(CY + y, rows[i], false, arrow);
+        drawListRow(CY + y, rows[i], false, arrow, badge && badge[i]);
       }
     }
   };
@@ -1389,6 +1423,79 @@ static int fsLoadMessages(FSMsg *arr, const String &peer) {
   }
   return n;
 }
+// New-message detection.
+// The API has no unread flag and the conversation list is usernames only, so a
+// conversation counts as "new" when its contents differ from what was on screen
+// the last time it was opened. We store one signature per peer in SPIFFS.
+// Cost: one request per conversation probed — hence the caps below.
+#define FS_SEEN_FILE     "/pico_msgseen.json"
+#define FS_SCAN_OPEN      8            // peers probed when the Messages list opens
+#define FS_SCAN_BG        3            // peers probed by the idle background check
+#define FS_SCAN_MS   300000UL          // background check interval (5 min)
+
+static uint32_t fsSigMsgs(FSMsg *a, int n) {           // FNV-1a over the thread
+  uint32_t h = 2166136261u;
+  for (int i = 0; i < n; i++) {
+    const String *f[3] = { &a[i].user, &a[i].date, &a[i].msg };
+    for (int k = 0; k < 3; k++)
+      for (unsigned j = 0; j < f[k]->length(); j++) { h ^= (uint8_t)f[k]->charAt(j); h *= 16777619u; }
+  }
+  return h ? h : 1u;                                   // 0 is reserved for "never seen"
+}
+static uint32_t fsSeenGet(const String &peer) {
+  File f = SPIFFS.open(FS_SEEN_FILE, FILE_READ);
+  if (!f) return 0;
+  JsonDocument d;
+  DeserializationError e = deserializeJson(d, f);
+  f.close();
+  if (e || d[peer].isNull()) return 0;
+  return d[peer].as<uint32_t>();
+}
+static void fsSeenSet(const String &peer, uint32_t sig) {
+  JsonDocument d;
+  File f = SPIFFS.open(FS_SEEN_FILE, FILE_READ);
+  if (f) { deserializeJson(d, f); f.close(); }
+  d[peer] = sig;
+  f = SPIFFS.open(FS_SEEN_FILE, FILE_WRITE);
+  if (!f) return;
+  serializeJson(d, f);
+  f.close();
+}
+// Drop a peer from the "new" set (called once its thread has been viewed).
+static void fsClearNew(const String &peer) {
+  int w = 0;
+  for (int i = 0; i < g_newPeerN; i++) if (g_newPeers[i] != peer) g_newPeers[w++] = g_newPeers[i];
+  g_newPeerN = w;
+  g_hasNewMsg = (w > 0);
+}
+// Probe up to `maxProbe` conversations, refreshing g_newPeers/g_hasNewMsg.
+// Fills `peers` with the conversation list and returns its length.
+static int fsScanNewMsgs(String *peers, int maxN, int maxProbe) {
+  if (WiFi.status() != WL_CONNECTED || credGet("user").length() == 0) return 0;
+  bool cacheWas = g_usingCache;                        // the probe must not
+  int n = fsLoadMsgUsers(peers, maxN);                 // disturb the UI's cache flag
+  if (n <= 0) { g_newPeerN = 0; g_hasNewMsg = false; g_usingCache = cacheWas; return n; }
+
+  static FSMsg scratch[FS_MAX];
+  const int cap = (int)(sizeof(g_newPeers) / sizeof(g_newPeers[0]));
+  int cnt = 0;
+  for (int i = 0; i < n && i < maxProbe; i++) {
+    int m = fsLoadMessages(scratch, peers[i]);
+    if (m <= 0) continue;
+    uint32_t sig = fsSigMsgs(scratch, m);
+    // Only the signature is needed — release the thread's string heap so a scan
+    // doesn't hold a whole conversation per peer.
+    for (int j = 0; j < m; j++) { scratch[j].user = ""; scratch[j].msg = ""; scratch[j].date = ""; }
+    uint32_t seen = fsSeenGet(peers[i]);
+    if (seen == 0) { fsSeenSet(peers[i], sig); continue; }   // first sight = baseline
+    if (sig != seen && cnt < cap) g_newPeers[cnt++] = peers[i];
+  }
+  g_newPeerN = cnt;
+  g_hasNewMsg = (cnt > 0);
+  g_usingCache = cacheWas;
+  return n;
+}
+
 // POST /messages/{me}/post/  body {"receiver","content"}
 static bool fsSendMessage(const String &peer, const String &content) {
   if (!fsOnline()) return false;
@@ -1754,6 +1861,9 @@ static FSVResult messagesThreadScreen(const String &peer) {
   tft->setTextColor(COL_DIM, COL_BG); tft->setTextDatum(MC_DATUM);
   tft->drawString("Loading...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
   int n = fsLoadMessages(msgs, peer);
+  // Viewing the thread is what marks it read: remember this exact content so a
+  // later change is what counts as "new".
+  if (n > 0 && !g_usingCache) { fsSeenSet(peer, fsSigMsgs(msgs, n)); fsClearNew(peer); }
   return fsViewer(msgs, n, String("@") + peer + (g_usingCache ? "  [offline]" : ""), FS_MESSAGES, 0, 0);
 }
 
@@ -1765,8 +1875,14 @@ static void messagesScreen() {
     tft->fillScreen(COL_BG); drawHeader("Messages", true);
     tft->setTextColor(COL_DIM, COL_BG); tft->setTextDatum(MC_DATUM);
     tft->drawString("Loading...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
-    int n = fsLoadMsgUsers(users, 40);
-    int sel = scrollList(g_usingCache ? "Messages [offline]" : "Messages", users, n, true, "Back", "New Msg", "");
+    // One scan drives both the row badges and the header envelope; it also
+    // returns the conversation list, so this costs no extra list request.
+    int n = fsScanNewMsgs(users, 40, FS_SCAN_OPEN);
+    if (n <= 0) n = fsLoadMsgUsers(users, 40);         // offline: fall back to cache
+    static bool newFlag[40];
+    for (int i = 0; i < n && i < 40; i++) newFlag[i] = fsPeerHasNew(users[i]);
+    int sel = scrollList(g_usingCache ? "Messages [offline]" : "Messages", users, n, true,
+                         "Back", "New Msg", "", newFlag);
     if (sel == SL_BACK || sel == SL_F0) return;
     if (sel == SL_F1) {                                // start a new conversation
       char b[64] = {0};
@@ -2092,6 +2208,19 @@ static void mainMenuRun(ViewManager *viewManager) {
     lastStatus  = WiFi.status();
     lastConn    = g_wifiConnecting;
     drawHeaderStatus();
+  }
+
+  // Idle check for new messages so the envelope can appear without opening
+  // Messages. Each probed conversation is a blocking request, so this only runs
+  // on the menu, once WiFi has settled, and looks at the few most recent peers.
+  static uint32_t lastScan = 0;
+  if (WiFi.status() == WL_CONNECTED && g_wb == WB_DONE && !down &&
+      (lastScan == 0 || millis() - lastScan > FS_SCAN_MS)) {
+    lastScan = millis();
+    static String scratch[40];
+    bool was = g_hasNewMsg;
+    fsScanNewMsgs(scratch, 40, FS_SCAN_BG);
+    if (g_hasNewMsg != was) drawHeaderStatus();
   }
 }
 
