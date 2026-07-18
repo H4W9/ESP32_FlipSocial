@@ -57,13 +57,24 @@ static Theme        theme;             // colour theme + accent + font + brightn
 #define COL_SEL    (theme.sel())
 static const uint16_t COL_OK = 0x07E0;   // status green (theme-independent)
 
-static const int SCRW = 320;
-static const int SCRH = 480;
+// Panel size comes from the board block in configs.h. Rotation is left at the
+// power-on default (0 = portrait), so these map straight onto the panel:
+// Pancake ST7796 = 320x480, V8 ILI9341 = 240x320. The layout below is derived
+// from these, so it reflows per board.
+static const int SCRW = TFT_WIDTH;
+static const int SCRH = TFT_HEIGHT;
 
 // Shell layout — matches H4W9 (header 28, nav 28, list rows 34).
 static const int HDRH     = 28;
 static const int NAVH     = 28;
+// The settings list is drawn at fixed offsets and does not scroll, so the rows
+// have to fit the panel: at 34 px they run off the bottom of the V8's 320 px
+// screen. 26 px still clears the 22 px chips and the 16 px font.
+#ifdef MARAUDER_V8
+static const int ITEMH    = 26;
+#else
 static const int ITEMH    = 34;
+#endif
 static const int CONTENTY = HDRH;
 
 // FlipSocial message + viewer result (defined here so Arduino's auto-generated
@@ -72,6 +83,49 @@ struct FSMsg { uint32_t id; String user, msg, date; int flips, comments; bool fl
 struct FSProfile { String bio, joined; int friends; bool ok; };
 enum FSVResult { FSV_BACK, FSV_PREV, FSV_NEXT };
 enum FSCred { FSC_OK, FSC_NOUSER, FSC_BADPASS, FSC_EMPTY, FSC_ERR };
+
+#ifndef HAS_CAP_TOUCH
+// Resistive touch calibration (V8). Capacitive panels report real coordinates
+// and need none of this. The 5 uint16 blob is TFT_eSPI's own format; it lives on
+// SPIFFS next to the other settings.
+static const char *TOUCH_CAL_FILE = "/pico_touch.dat";
+
+static bool touchCalLoad(uint16_t *cal) {
+  File f = SPIFFS.open(TOUCH_CAL_FILE, "r");
+  if (!f) return false;
+  bool ok = (f.read((uint8_t *)cal, sizeof(uint16_t) * 5) == sizeof(uint16_t) * 5);
+  f.close();
+  return ok;
+}
+static void touchCalSave(const uint16_t *cal) {
+  File f = SPIFFS.open(TOUCH_CAL_FILE, "w");
+  if (!f) return;
+  f.write((const uint8_t *)cal, sizeof(uint16_t) * 5);
+  f.close();
+}
+// TFT_eSPI's 4-corner wizard. Blocking, and deliberately drawn without the theme
+// so it is legible before anything else is up.
+static void touchCalRun() {
+  uint16_t cal[5];
+  tft->fillScreen(TFT_BLACK);
+  tft->setTextColor(TFT_WHITE, TFT_BLACK);
+  tft->setTextDatum(MC_DATUM);
+  tft->drawString("Touch Calibration", SCRW / 2, SCRH / 2 - 24, 4);
+  tft->drawString("Tap each corner arrow", SCRW / 2, SCRH / 2 + 6, 2);
+  tft->setTextDatum(TL_DATUM);
+  delay(1500);
+  tft->fillScreen(TFT_BLACK);
+  tft->calibrateTouch(cal, TFT_MAGENTA, TFT_BLACK, 15);
+  tft->setTouch(cal);
+  touchCalSave(cal);
+}
+// Load the stored calibration, or run the wizard once on first boot.
+static void touchCalInit() {
+  uint16_t cal[5];
+  if (touchCalLoad(cal)) tft->setTouch(cal);
+  else                   touchCalRun();
+}
+#endif // !HAS_CAP_TOUCH
 
 // Touch helpers
 // Wait for a fresh tap (press edge) and return its point; blocks.
@@ -108,8 +162,38 @@ static void applyThemeToViewManager() {
   vm->setSelectedColor(theme.sel());
 }
 
-// Status RGB LED (onboard addressable LED). Colour-coded by action:
-//   yellow = WiFi scan/connect, blue = HTTP fetch, green = success, red = error.
+// Status LED. Colour-coded by action where the hardware allows:
+//   amber = WiFi scan/connect, blue = HTTP fetch, green = success, red = error.
+// The public API (ledOff/ledWifi/ledHttp/ledOk/ledErr/ledBlinkOk/ledSet) is the
+// same for both backends; only the drive layer differs per board.
+#ifdef HAS_ACT_LED
+// V8: one blue GPIO LED (active-high). GPIO28 is a strapping pin (pull-up =
+// normal SPI boot), so it is handled exactly like the Marauder firmware does:
+// a plain digital output — no PWM/LEDC routed onto the strap pin and no pad-hold,
+// so a reset always releases it back to the pull-up and boots normally. No colour,
+// so every status maps to on/off; success is a brief blink. led_bright 0 = off,
+// keeping the Settings LED row functional (as a simple on/off, not a dimmer).
+static bool g_actLedReady = false;
+static void ledActArm() {
+  if (g_actLedReady) return;
+  pinMode(ACT_LED_PIN, OUTPUT);
+  digitalWrite(ACT_LED_PIN, LOW);
+  g_actLedReady = true;
+}
+static void ledActSet(bool on) {
+  ledActArm();
+  digitalWrite(ACT_LED_PIN, (on && theme.led_bright > 0) ? HIGH : LOW);
+}
+static inline void ledOff()  { ledActSet(false); }
+static inline void ledWifi() { ledActSet(true); }
+static inline void ledHttp() { ledActSet(true); }
+static inline void ledOk()   { ledActSet(true); }
+static inline void ledErr()  { ledActSet(true); }
+static inline void ledBlinkOk(uint16_t ms = 150) { ledActSet(true); delay(ms); ledActSet(false); }
+static void ledSet(bool on) { ledActSet(on); }
+
+#else
+// Pancake: onboard addressable RGB LED (WS2812-style).
 #ifdef RGB_BUILTIN
   #define PW_RGB_PIN RGB_BUILTIN
 #else
@@ -139,6 +223,7 @@ static inline void ledErr()  { ledRGB(255,  0,   0); } // red   — error
 static inline void ledBlinkOk(uint16_t ms = 150) { ledOk(); delay(ms); ledOff(); }
 // Back-compat shim: old on/off calls map to the WiFi (amber) colour.
 static void ledSet(bool on) { if (on) ledWifi(); else ledOff(); }
+#endif // HAS_ACT_LED
 
 // FlipSocial credentials (SPIFFS: /pico_user.json)
 static String credGet(const char *key) {
@@ -846,7 +931,13 @@ static void wifiDebug() {
 }
 
 // Settings (H4W9 layout: highlight on tap, partial redraw, no flash)
-static const int SET_N = 10;  // Theme, Accent, Font Color, Brightness, LED, WiFi, Debug, User, Pass, About
+// Theme, Accent, Font Color, Brightness, LED, WiFi, Debug, User, Pass, About
+// (+ Calibrate Touch on resistive panels — capacitive needs no calibration).
+#ifdef HAS_CAP_TOUCH
+static const int SET_N = 10;
+#else
+static const int SET_N = 11;
+#endif
 // Value string for the chip rows that need it for hit-testing.
 static String setChipVal(int row) {
   switch (row) {
@@ -873,6 +964,9 @@ static void drawSettingRow(int row, int sel) {
     case 7: drawInfoRow(y, "Username",   credGet("user"), s); break;
     case 8: drawInfoRow(y, "Password",   credGet("pass").length() ? String("****") : String(""), s); break;
     case 9: drawInfoRow(y, "About",      "", s); break;
+#ifndef HAS_CAP_TOUCH
+    case 10: drawInfoRow(y, "Calibrate Touch", "", s); break;
+#endif
   }
 }
 
@@ -880,41 +974,58 @@ static void drawSettingRow(int row, int sel) {
 static void aboutScreen() {
   tft->fillScreen(COL_BG);
   drawHeader("About", true);
+
+  // Compact spacing so the whole page fits above the "tap to go back" line on the
+  // shorter V8 panel (240x320); the Pancake keeps its original roomier layout.
+#ifdef MARAUDER_V8
+  const int dName = 26, dSub = 17, dAuth = 18, dRule = 6, dRow = 17, dGap = 2, dRule2 = 6, dCred = 16;
+  const int valX = 82;   // value column; keeps "XPT2046 resistive" inside 240 px
+  const char *credit1 = "App & API by JBlanked";
+  const char *credit2 = "Picoware engine";
+#else
+  const int dName = 32, dSub = 22, dAuth = 24, dRule = 10, dRow = 21, dGap = 4, dRule2 = 8, dCred = 20;
+  const int valX = 110;
+  const char *credit1 = "FlipSocial app & API by JBlanked";
+  const char *credit2 = "jblanked.com/flipper  -  Picoware";
+#endif
+
   int cx = SCRW / 2, y = CONTENTY + 12;
 
   // Name + version + author (centred, prominent).
   tft->setTextColor(COL_FG, COL_BG);
   tft->setTextDatum(MC_DATUM);
-  tft->drawString(FW_NAME, cx, y, 4); y += 32;
-  tft->drawString(String("Version ") + FW_VERSION, cx, y, 2); y += 22;
+  tft->drawString(FW_NAME, cx, y, 4); y += dName;
+  tft->drawString(String("Version ") + FW_VERSION, cx, y, 2); y += dSub;
   tft->setTextColor(COL_DIM, COL_BG);
-  tft->drawString("by " FW_AUTHOR, cx, y, 2); y += 24;
-  tft->drawFastHLine(16, y, SCRW - 32, theme.neon(1, theme.edge())); y += 10;
+  tft->drawString("UI by " FW_AUTHOR, cx, y, 2); y += dAuth;
+  tft->drawFastHLine(16, y, SCRW - 32, theme.neon(1, theme.edge())); y += dRule;
 
   // Label : value detail rows.
   tft->setTextDatum(TL_DATUM);
   auto row = [&](const char *label, const String &value) {
     tft->setTextColor(COL_DIM, COL_BG); tft->drawString(label, 16, y, 2);
-    tft->setTextColor(COL_FG, COL_BG);  tft->drawString(value, 110, y, 2);
-    y += 21;
+    tft->setTextColor(COL_FG, COL_BG);  tft->drawString(value, valX, y, 2);
+    y += dRow;
   };
   row("Board",   BOARD_NAME);
   row("MCU",     BOARD_MCU);
   row("Display", BOARD_DISPLAY);
   row("Touch",   BOARD_TOUCH);
-#ifdef HAS_PSRAM
-  row("PSRAM",   "Yes");
-#else
-  row("PSRAM",   "None");
-#endif
+  // Actual PSRAM size (0 if absent or init failed), rounded to whole MB.
+  {
+    size_t ps = ESP.getPsramSize();
+    if (ps >= 1024 * 1024)  row("PSRAM", String((unsigned)((ps + 512 * 1024) / (1024 * 1024))) + " MB");
+    else if (ps > 0)        row("PSRAM", String((unsigned)(ps / 1024)) + " KB");
+    else                    row("PSRAM", "None");
+  }
   row("Built",   __DATE__);
   row("Commit",  FW_COMMIT);
 
-  y += 4;
-  tft->drawFastHLine(16, y, SCRW - 32, theme.neon(2, theme.edge())); y += 8;
+  y += dGap;
+  tft->drawFastHLine(16, y, SCRW - 32, theme.neon(2, theme.edge())); y += dRule2;
   tft->setTextColor(COL_DIM, COL_BG);
-  tft->drawString("FlipSocial app & API by JBlanked", 16, y, 2); y += 20;
-  tft->drawString("jblanked.com/flipper  -  Picoware", 16, y, 2);
+  tft->drawString(credit1, 16, y, 2); y += dCred;
+  tft->drawString(credit2, 16, y, 2);
 
   statusLine("Tap to go back.", COL_DIM);
   uint16_t x, ty; waitTap(x, ty);
@@ -969,6 +1080,9 @@ static void settingsFlow() {
                   credSet("pass", String(b));
                 full(); } break;
       case 9: aboutScreen(); full(); break;
+#ifndef HAS_CAP_TOUCH
+      case 10: touchCalRun(); full(); break;   // resistive drifts — allow a redo
+#endif
       default: break;
     }
   }
@@ -1430,10 +1544,11 @@ static FSVResult fsViewer(FSMsg *arr, int n, const String &title, int mode, uint
 static int fsCommentsScreen(uint32_t postId);   // returns # comments added
 
 static void fsActionPopup(FSMsg &m) {
-  int bw = 264, bh = 252, bx = (SCRW - bw) / 2, by = (SCRH - bh) / 2;
+  // Cap the width to the panel — the 264 px design overflows the V8's 240 px.
+  int bw = min(264, SCRW - 24), bh = 252, bx = (SCRW - bw) / 2, by = (SCRH - bh) / 2;
   int byy = by + 44, bhh = 44, gap = 8;
   for (;;) {
-    const char *labels[4] = { m.flipped ? "Unflip" : "Flip", "View Comments", "Add Comment", "Close" };
+    const char *labels[4] = { m.flipped ? "Unflip" : "Flip", "View Comments", "Comment", "Close" };
     tft->fillRoundRect(bx, by, bw, bh, 10, COL_ACCENT);
     tft->drawRoundRect(bx, by, bw, bh, 10, theme.neon(2, COL_SEL));
     tft->setTextColor(COL_FG, COL_ACCENT);
@@ -1463,7 +1578,7 @@ static void fsActionPopup(FSMsg &m) {
 
 // Smooth-scrolling message viewer (feed or comments) with momentum + footer.
 // FEED footer: [< Prev][+ New Post][Next >] -> returns FSV_PREV / FSV_NEXT / FSV_BACK.
-// COMMENTS footer: [+ Add Comment]          -> returns FSV_BACK.
+// COMMENTS footer: [Comment]                -> returns FSV_BACK.
 static FSVResult fsViewer(FSMsg *arr, int n, const String &title, int mode, uint32_t ctxPost, int series) {
   const int SPR_H = SCRH - HDRH - NAVH;
   int top[FS_MAX], hh[FS_MAX], total;
@@ -1485,9 +1600,9 @@ static FSVResult fsViewer(FSMsg *arr, int n, const String &title, int mode, uint
   }
 
   auto footer = [&]() {
-    if (mode == FS_FEED)          drawNav("< Prev", "+ New Post", "Next >");
-    else if (mode == FS_COMMENTS) drawNav("", "+ Add Comment", "");
-    else if (mode == FS_MESSAGES) drawNav("< Prev", "+ Send", "Next >");
+    if (mode == FS_FEED)          drawNav("< Prev", "New Post", "Next >");
+    else if (mode == FS_COMMENTS) drawNav("", "Comment", "");
+    else if (mode == FS_MESSAGES) drawNav("< Prev", "Send", "Next >");
     else                          drawNav("< Prev", "", "Next >");   // My Posts: page-only
   };
 
@@ -1642,7 +1757,7 @@ static FSVResult messagesThreadScreen(const String &peer) {
   return fsViewer(msgs, n, String("@") + peer + (g_usingCache ? "  [offline]" : ""), FS_MESSAGES, 0, 0);
 }
 
-// Messages — conversation list with a [Back][+ New Msg] footer. Tap a user to open
+// Messages — conversation list with a [Back][New Msg] footer. Tap a user to open
 // the thread; Prev/Next in the thread page through the conversation list.
 static void messagesScreen() {
   static String users[40];
@@ -1651,7 +1766,7 @@ static void messagesScreen() {
     tft->setTextColor(COL_DIM, COL_BG); tft->setTextDatum(MC_DATUM);
     tft->drawString("Loading...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
     int n = fsLoadMsgUsers(users, 40);
-    int sel = scrollList(g_usingCache ? "Messages [offline]" : "Messages", users, n, true, "Back", "+ New Msg", "");
+    int sel = scrollList(g_usingCache ? "Messages [offline]" : "Messages", users, n, true, "Back", "New Msg", "");
     if (sel == SL_BACK || sel == SL_F0) return;
     if (sel == SL_F1) {                                // start a new conversation
       char b[64] = {0};
@@ -1691,7 +1806,8 @@ static bool fsReady() {
 
 // Modal yes/no confirmation (theme + font colours). Returns true on OK.
 static bool confirmDialog(const String &title, const String &sub) {
-  int bw = 260, bh = 150, bx = (SCRW - bw) / 2, by = (SCRH - bh) / 2;
+  // Cap the width to the panel — the 260 px design overflows the V8's 240 px.
+  int bw = min(260, SCRW - 24), bh = 150, bx = (SCRW - bw) / 2, by = (SCRH - bh) / 2;
   tft->fillRoundRect(bx, by, bw, bh, 10, COL_ACCENT);
   tft->drawRoundRect(bx, by, bw, bh, 10, theme.neon(2, COL_SEL));
   tft->setTextColor(COL_FG, COL_ACCENT);
@@ -1883,7 +1999,7 @@ static void exploreScreen() {
     tft->setTextColor(COL_DIM, COL_BG); tft->setTextDatum(MC_DATUM);
     tft->drawString("Searching...", SCRW / 2, SCRH / 2, 2); tft->setTextDatum(TL_DATUM);
     int n = fsExplore(String(kw), users, 40);
-    int sel = scrollList(String("Explore: ") + kw, users, n, true, "Back", "+ Search", "");
+    int sel = scrollList(String("Explore: ") + kw, users, n, true, "Back", "Search", "");
     if (sel == SL_BACK || sel == SL_F0) return;
     if (sel == SL_F1) {                                // new search
       kw[0] = 0;
@@ -1926,7 +2042,12 @@ static void drawMenu() {
     tft->drawRoundRect(MENU_MARGIN, y, SCRW - 2 * MENU_MARGIN, bh, 12, theme.neon(i * 3, COL_DIM));
     tft->setTextColor(COL_FG, COL_ACCENT);
     tft->setTextDatum(MC_DATUM);
+    // V8's buttons are ~34 px tall — font 4 (26 px) crowds them, so use font 2.
+#ifdef MARAUDER_V8
+    tft->drawString(MENU_ITEMS[i], SCRW / 2, y + bh / 2, 2);
+#else
     tft->drawString(MENU_ITEMS[i], SCRW / 2, y + bh / 2, 4);
+#endif
   }
   tft->setTextDatum(TL_DATUM);
 }
@@ -1986,7 +2107,7 @@ void setup() {
   Serial.begin(115200);
   uint32_t t0 = millis();
   while (!Serial && (millis() - t0) < 1500) delay(10);
-  Serial.println(F("[Pancake] FlipSocial starting..."));
+  Serial.println(F("[" BOARD_NAME "] FlipSocial starting..."));
 
   // Backlight off during init (PWM).
   pinMode(TFT_BL, OUTPUT);
@@ -2003,35 +2124,56 @@ void setup() {
 #ifdef HAS_C5_SD
   sharedSPI.begin(SD_SCK, SD_MISO, SD_MOSI);
   delay(100);
-  if (!SD.begin(SD_CS, sharedSPI)) Serial.println(F("[Pancake] SD init failed"));
-  else Serial.println(F("[Pancake] SD OK"));
+  if (!SD.begin(SD_CS, sharedSPI)) Serial.println(F("[" BOARD_NAME "] SD init failed"));
+  else Serial.println(F("[" BOARD_NAME "] SD OK"));
 #else
-  if (!SD.begin(SD_CS)) Serial.println(F("[Pancake] SD init failed"));
+  if (!SD.begin(SD_CS)) Serial.println(F("[" BOARD_NAME "] SD init failed"));
 #endif
 
   // SPIFFS for settings + credentials (format on first boot).
-  if (!SPIFFS.begin(true)) Serial.println(F("[Pancake] SPIFFS mount failed"));
-  else                     Serial.println(F("[Pancake] SPIFFS OK"));
+  if (!SPIFFS.begin(true)) Serial.println(F("[" BOARD_NAME "] SPIFFS mount failed"));
+  else                     Serial.println(F("[" BOARD_NAME "] SPIFFS OK"));
 
 #ifdef HAS_PSRAM
-  if (!psramInit()) Serial.println(F("[Pancake] PSRAM unavailable"));
+  if (!psramInit()) Serial.println(F("[" BOARD_NAME "] PSRAM unavailable"));
 #endif
 
+#ifdef HAS_CAP_TOUCH
   // Capacitive touch (also does Wire.begin on the shared I2C bus).
   ft6336_init();
+#else
+  // V8 has no I2C touch controller (XPT2046 rides the SPI bus), but the fuel
+  // gauge below still needs the I2C bus that ft6336_init() would have opened.
+  Wire.begin(I2C_SDA, I2C_SCL, 400000U);
+#endif
   battInit();                          // MAX17048 fuel gauge on the same I2C bus
 
   // Load persisted theme/accent/font/brightness before anything draws.
   theme.load();
 
+  // Put the status LED in a known-off state (also arms the V8's PWM channel).
+  ledOff();
+
   // ViewManager owns the panel (Draw) and touch (InputManager).
+#ifdef MARAUDER_V8
+  vm    = new ViewManager(MarauderV8Config);
+#else
   vm    = new ViewManager(PancakeConfig);
+#endif
   tft   = vm->getDraw()->display->getTFT();
   touch = vm->getInputManager()->getTouch();
   applyThemeToViewManager();
 
   // Backlight on at the saved brightness.
   applyBrightness();
+
+#ifndef HAS_CAP_TOUCH
+  // Resistive panel: point TouchInput at TFT_eSPI's XPT2046 reader, then load
+  // the stored calibration (or run the wizard). Must come after the backlight is
+  // up, or a first-boot user would be tapping an unlit screen.
+  if (touch) touch->attachTFT(tft);
+  touchCalInit();
+#endif
 
   // WiFi: capture disconnect reasons for diagnostics.
   WiFi.onEvent(wifiEvent);
@@ -2044,7 +2186,7 @@ void setup() {
   wifiBgBegin();
   drawHeaderStatus();                  // show the "connecting" (yellow) icon at once
 
-  Serial.println(F("[Pancake] Ready."));
+  Serial.println(F("[" BOARD_NAME "] Ready."));
 }
 
 void loop() {

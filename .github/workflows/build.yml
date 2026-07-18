@@ -29,13 +29,12 @@ jobs:
             tft_setup: User_Setup_marauder_pancake
             max_size:  3604480    # ota_0 slot size (0x370000)
 
-          # ── V8 (ESP32-C5, ILI9341 240x320, resistive) — enable once the V8
-          #     board port lands. Uncomment to add it to the build matrix.
-          # - board:     MARAUDER_V8
-          #   short:     v8
-          #   fqbn:      "esp32:esp32:esp32c5:CDCOnBoot=default,CPUFreq=240,FlashFreq=80,FlashMode=qio,FlashSize=8M,PSRAM=enabled,PartitionScheme=custom,UploadSpeed=921600"
-          #   tft_setup: User_Setup_marauder_v8
-          #   max_size:  3604480
+          # ── V8 (ESP32-C5, 8 MB flash, PSRAM) — ILI9341 240x320, XPT2046 ──────
+          - board:     MARAUDER_V8
+            short:     v8
+            fqbn:      "esp32:esp32:esp32c5:CDCOnBoot=default,CPUFreq=240,FlashFreq=80,FlashMode=qio,FlashSize=8M,PSRAM=enabled,PartitionScheme=custom,UploadSpeed=921600"
+            tft_setup: User_Setup_marauder_v8
+            max_size:  3604480    # ota_0 slot size (0x370000)
 
     steps:
       - name: Checkout repository
@@ -123,7 +122,11 @@ jobs:
             .
 
       # Rename to match the release template:
-      #   ESP32_FlipSocial_v<ver>_<board>.bin  (+ bootloader / partitions / merged)
+      #   ESP32_FlipSocial_v<ver>_<board>.bin  (+ _merged, bootloader, partitions)
+      # The app and merged images differ per board, so both carry the board name —
+      # otherwise the two matrix jobs would collide when the release step merges
+      # their artifacts. bootloader/partitions are byte-identical across the
+      # boards (same C5 FQBN + partitions.csv), so they stay unsuffixed.
       - name: Rename binaries
         id: bins
         run: |
@@ -132,12 +135,11 @@ jobs:
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           mkdir -p out
           D="dist/${{ matrix.short }}"
-          # App bin carries the board name (matches the v1.0.0 release template).
-          cp "$D/ESP32_FlipSocial.ino.bin" "out/ESP32_FlipSocial_v${VER_U}_${{ matrix.short }}.bin"
-          # Shared bins (single-board build) match the template names verbatim.
+          B="ESP32_FlipSocial_v${VER_U}_${{ matrix.short }}"
+          cp "$D/ESP32_FlipSocial.ino.bin" "out/${B}.bin"
+          [ -f "$D/ESP32_FlipSocial.ino.merged.bin" ]     && cp "$D/ESP32_FlipSocial.ino.merged.bin"     "out/${B}_merged.bin"              || true
           [ -f "$D/ESP32_FlipSocial.ino.bootloader.bin" ] && cp "$D/ESP32_FlipSocial.ino.bootloader.bin" "out/ESP32_FlipSocial_bootloader.bin" || true
           [ -f "$D/ESP32_FlipSocial.ino.partitions.bin" ] && cp "$D/ESP32_FlipSocial.ino.partitions.bin" "out/ESP32_FlipSocial_partitions.bin" || true
-          [ -f "$D/ESP32_FlipSocial.ino.merged.bin" ]     && cp "$D/ESP32_FlipSocial.ino.merged.bin"     "out/ESP32_FlipSocial_merged.bin"     || true
           ls -l out
 
       - name: Upload ${{ matrix.short }} binaries

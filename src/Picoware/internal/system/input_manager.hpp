@@ -12,7 +12,10 @@ namespace Picoware
             for (int i = 0; i < 5; i++)
                 inputs[i] = nullptr;
 
-            if (board.boardType == BOARD_TYPE_PANCAKE)
+            // Touch-panel boards. The backend (FT6336 vs XPT2046) is chosen later
+            // by the sketch via TouchInput::attachTFT, not here.
+            if (board.boardType == BOARD_TYPE_PANCAKE ||
+                board.boardType == BOARD_TYPE_MARAUDER_V8)
             {
                 isTouchInput = true;
                 touch = new TouchInput(board.width, board.height, board.rotation);

@@ -1,5 +1,6 @@
 #include "../../internal/system/input.hpp"
 #include <Wire.h>
+#include <TFT_eSPI.h>
 #include <string.h>
 
 // FT6336 capacitive touch controller (shares the I2C bus brought up in setup()).
@@ -8,6 +9,8 @@
 // Panel-native (portrait) resolution of the Pancake ST7796 + FT6336.
 #define PW_PANEL_W 320
 #define PW_PANEL_H 480
+// XPT2046 pressure threshold (resistive backend); matches the touch keyboard.
+#define PW_XPT_THRESHOLD 600
 
 namespace Picoware
 {
@@ -38,6 +41,20 @@ namespace Picoware
 
     bool TouchInput::readPanel(uint16_t &sx, uint16_t &sy)
     {
+        // Resistive backend: TFT_eSPI applies the stored calibration and the
+        // active rotation, so the coords come back already in screen space.
+        if (tft != nullptr)
+        {
+            uint16_t tx, ty;
+            if (!tft->getTouch(&tx, &ty, PW_XPT_THRESHOLD))
+                return false;
+            sx = tx;
+            sy = ty;
+            if (sx >= w) sx = w - 1;
+            if (sy >= h) sy = h - 1;
+            return true;
+        }
+
         uint16_t rx, ry;
         if (!ft6336_read_raw(rx, ry))
             return false;
