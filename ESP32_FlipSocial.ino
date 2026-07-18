@@ -55,10 +55,6 @@ static const uint16_t COL_MAIL = 0x07FF;   // cyan — envelope badge
 static bool   g_hasNewMsg = false;         // drives the header envelope
 static String g_newPeers[12];              // peers with unseen messages (row badges)
 static int    g_newPeerN = 0;
-static bool fsPeerHasNew(const String &peer) {
-  for (int i = 0; i < g_newPeerN; i++) if (g_newPeers[i] == peer) return true;
-  return false;
-}
 
 // Theme-driven colours (macros so every use follows the current theme).
 #define COL_BG     (theme.bg())
@@ -94,6 +90,14 @@ struct FSMsg { uint32_t id; String user, msg, date; int flips, comments; bool fl
 struct FSProfile { String bio, joined; int friends; bool ok; };
 enum FSVResult { FSV_BACK, FSV_PREV, FSV_NEXT };
 enum FSCred { FSC_OK, FSC_NOUSER, FSC_BADPASS, FSC_EMPTY, FSC_ERR };
+
+// Kept below the type declarations above: Arduino inserts its auto-generated
+// prototypes ahead of the FIRST function in the sketch, so defining any function
+// above these types would push the prototypes above them and break the build.
+static bool fsPeerHasNew(const String &peer) {
+  for (int i = 0; i < g_newPeerN; i++) if (g_newPeers[i] == peer) return true;
+  return false;
+}
 
 #ifndef HAS_CAP_TOUCH
 // Resistive touch calibration (V8). Capacitive panels report real coordinates
@@ -359,12 +363,25 @@ static void wifiArc(int cx, int cy, int r, uint16_t c) {
   }
 }
 
-// Envelope badge: body rect + the two flap diagonals. Templated because
-// TFT_eSprite's drawing methods are not virtual, so this binds the right
-// overload at compile time for both the panel and a sprite.
-template <typename G>
-static void drawEnvelope(G &g, int x, int y, int w, int h, uint16_t col) {
-  g.drawRect(x, y, w, h, col);
+// Envelope badge: body outline + the two flap diagonals.
+// Two concrete overloads rather than one template, for two reasons: Arduino
+// cannot auto-prototype a template in a .ino, and only drawPixel is virtual in
+// TFT_eSPI — TFT_eSprite merely hides drawLine/drawFast*Line and has no drawRect
+// at all, so a sprite passed as a TFT_eSPI& would draw onto the panel instead.
+// Both bodies use only primitives the target actually owns.
+static void drawEnvelope(TFT_eSPI &g, int x, int y, int w, int h, uint16_t col) {
+  g.drawFastHLine(x, y,         w, col);
+  g.drawFastHLine(x, y + h - 1, w, col);
+  g.drawFastVLine(x,         y, h, col);
+  g.drawFastVLine(x + w - 1, y, h, col);
+  g.drawLine(x + 1,     y + 1, x + w / 2, y + h / 2, col);
+  g.drawLine(x + w - 2, y + 1, x + w / 2, y + h / 2, col);
+}
+static void drawEnvelope(TFT_eSprite &g, int x, int y, int w, int h, uint16_t col) {
+  g.drawFastHLine(x, y,         w, col);
+  g.drawFastHLine(x, y + h - 1, w, col);
+  g.drawFastVLine(x,         y, h, col);
+  g.drawFastVLine(x + w - 1, y, h, col);
   g.drawLine(x + 1,     y + 1, x + w / 2, y + h / 2, col);
   g.drawLine(x + w - 2, y + 1, x + w / 2, y + h / 2, col);
 }
