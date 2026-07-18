@@ -997,7 +997,7 @@ static void aboutScreen() {
   tft->drawString(FW_NAME, cx, y, 4); y += dName;
   tft->drawString(String("Version ") + FW_VERSION, cx, y, 2); y += dSub;
   tft->setTextColor(COL_DIM, COL_BG);
-  tft->drawString("by " FW_AUTHOR, cx, y, 2); y += dAuth;
+  tft->drawString("UI by " FW_AUTHOR, cx, y, 2); y += dAuth;
   tft->drawFastHLine(16, y, SCRW - 32, theme.neon(1, theme.edge())); y += dRule;
 
   // Label : value detail rows.
