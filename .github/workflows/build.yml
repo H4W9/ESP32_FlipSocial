@@ -48,16 +48,45 @@ jobs:
         id: esp32-core-cache
         with:
           path: ~/.arduino15
-          key: esp32-core-${{ runner.os }}-${{ hashFiles('.github/workflows/build.yml') }}
+          # Keyed off a dedicated marker file, NOT the whole build.yml — see
+          # that file's header for why. Editing this workflow (e.g. adding a
+          # build step) should never force a fresh multi-hundred-MB core
+          # re-download on its own.
+          key: esp32-core-${{ runner.os }}-${{ hashFiles('.github/esp32-core-cache-key.txt') }}
 
+      # Espressif's package host occasionally 503s / times out on these large
+      # tool downloads (esp32-arduino-libs, esp-x32, esp-rv32, ...) — this is a
+      # known, recurring flake reported across the Arduino/Espressif community,
+      # not something specific to this repo. Retry with backoff so one bad
+      # download doesn't fail the whole matrix.
       - name: Install ESP32 Arduino core
         if: steps.esp32-core-cache.outputs.cache-hit != 'true'
         run: |
           arduino-cli config init --overwrite
           arduino-cli config add board_manager.additional_urls \
             https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-          arduino-cli core update-index
-          arduino-cli core install esp32:esp32
+
+          retry() {
+            local desc="$1"; shift
+            for attempt in 1 2 3 4 5; do
+              echo "::group::$desc (attempt $attempt/5)"
+              if "$@"; then
+                echo "::endgroup::"
+                return 0
+              fi
+              echo "::endgroup::"
+              if [ "$attempt" -eq 5 ]; then
+                echo "::error::$desc failed after 5 attempts"
+                return 1
+              fi
+              sleep_for=$((attempt * 20))
+              echo "$desc failed, retrying in ${sleep_for}s..."
+              sleep "$sleep_for"
+            done
+          }
+
+          retry "core update-index" arduino-cli core update-index
+          retry "core install esp32:esp32" arduino-cli core install esp32:esp32
 
       - name: Restore arduino-cli config (cache hit path)
         if: steps.esp32-core-cache.outputs.cache-hit == 'true'
@@ -134,11 +163,25 @@ jobs:
           set -euo pipefail
           pip install --quiet esptool==4.8.1
           D="dist/${{ matrix.short }}"
-          APP_OFFSET=$(awk -F',' '$1 ~ /^[[:space:]]*ota_0[[:space:]]*$/ {gsub(/[[:space:]]/,"",$4); print $4}' partitions.csv)
+          # Match on the Type column ('app'), not a specific label — works for
+          # both an OTA table (ota_0/ota_1) and a single-app table (factory).
+          # Takes the FIRST app partition found, which is the one that boots.
+          APP_OFFSET=$(awk -F',' '
+            /^[[:space:]]*#/ { next }
+            NF < 2 { next }
+            {
+              type=$2; gsub(/[[:space:]]/, "", type)
+              if (type == "app") {
+                off=$4; gsub(/[[:space:]]/, "", off)
+                print off
+                exit
+              }
+            }
+          ' partitions.csv)
           if [ -z "$APP_OFFSET" ]; then
-            echo "::error::Could not find ota_0 offset in partitions.csv"; exit 1
+            echo "::error::Could not find an app partition in partitions.csv"; exit 1
           fi
-          echo "ota_0 (app) offset from partitions.csv: $APP_OFFSET"
+          echo "app partition offset from partitions.csv: $APP_OFFSET"
           python3 -m esptool --chip esp32c5 merge_bin \
             -o "$D/ESP32_FlipSocial.ino.merged.bin" \
             --flash_mode qio --flash_freq 80m --flash_size 8MB \
