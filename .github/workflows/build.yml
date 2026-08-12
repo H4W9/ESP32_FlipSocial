@@ -121,6 +121,32 @@ jobs:
             --warnings default \
             .
 
+      # arduino-cli's own *_merged.bin is built from a fixed APP0 address
+      # (0x10000 — the default single/OTA-scheme app offset) and never looks
+      # at our partitions.csv. Our table puts otadata at 0x10000 and the real
+      # app (ota_0) at 0x20000, so the auto-generated merged binary lands the
+      # app on top of otadata instead of its real slot. Re-merge it by hand,
+      # reusing the bootloader/partition-table blobs arduino-cli already
+      # placed correctly (0x2000 / 0x8000 for the C5) and reading the real
+      # app offset out of partitions.csv so this can't silently drift again.
+      - name: Re-merge firmware with correct app offset (esptool)
+        run: |
+          set -euo pipefail
+          pip install --quiet esptool==4.8.1
+          D="dist/${{ matrix.short }}"
+          APP_OFFSET=$(awk -F',' '$1 ~ /^[[:space:]]*ota_0[[:space:]]*$/ {gsub(/[[:space:]]/,"",$4); print $4}' partitions.csv)
+          if [ -z "$APP_OFFSET" ]; then
+            echo "::error::Could not find ota_0 offset in partitions.csv"; exit 1
+          fi
+          echo "ota_0 (app) offset from partitions.csv: $APP_OFFSET"
+          python3 -m esptool --chip esp32c5 merge_bin \
+            -o "$D/ESP32_FlipSocial.ino.merged.bin" \
+            --flash_mode qio --flash_freq 80m --flash_size 8MB \
+            --fill-flash-size 8MB \
+            0x2000        "$D/ESP32_FlipSocial.ino.bootloader.bin" \
+            0x8000        "$D/ESP32_FlipSocial.ino.partitions.bin" \
+            "$APP_OFFSET" "$D/ESP32_FlipSocial.ino.bin"
+
       # Rename to match the release template:
       #   ESP32_FlipSocial_v<ver>_<board>.bin  (+ _merged, bootloader, partitions)
       # The app and merged images differ per board, so both carry the board name —
